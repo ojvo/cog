@@ -1,8 +1,8 @@
 package main
 
 import (
-	"ojv/cog/cor"
 	"fmt"
+	"ojv/cog/cor"
 	"os"
 	"time"
 )
@@ -32,12 +32,12 @@ func main() {
 	defer cor.Close()
 
 	cor.Info("==================================================")
-	cor.Info("   CNL/COR Framework Full Demonstration")
+	cor.Info("   Cog/COR Framework Full Demonstration")
 	cor.Info("==================================================")
 
 	// 2. 演示直接通过 cor 访问配置
-	cor.Infof("应用加载成功: %s (v%s) [%s]", 
-		cor.GetString("app.name"), 
+	cor.Infof("应用加载成功: %s (v%s) [%s]",
+		cor.GetString("app.name"),
 		cor.GetString("app.version"),
 		cor.GetString("app.env"))
 
@@ -45,7 +45,7 @@ func main() {
 	var appCfg AppConfig
 	var svrCfg ServerConfig
 	conf := cor.ConfigInstance()
-	
+
 	conf.Bind("", &appCfg)
 	conf.Bind("server", &svrCfg)
 

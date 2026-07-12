@@ -15,14 +15,14 @@ var (
 	defaultKernel = &Kernel{}
 )
 
-// Kernel represents the cnl application kernel.
+// Kernel represents the Cog application kernel.
 type Kernel struct {
 	mu           sync.RWMutex
 	globalConfig atomic.Pointer[cfg.Config]
 	components   []Component
 }
 
-// Component defines the interface for cnl components.
+// Component defines the interface for Cog components.
 type Component interface {
 	Name() string
 	Init(c *cfg.Config) error

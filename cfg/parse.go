@@ -125,8 +125,8 @@ func normalizeJSONVal(v any) any {
 
 func parseINI(data []byte) (map[string]any, error) {
 	root := make(map[string]any)
-	section := ""   // current section path (dotted)
-	sliceKey := ""  // current [[slice.key]] path (dotted)
+	section := ""  // current section path (dotted)
+	sliceKey := "" // current [[slice.key]] path (dotted)
 	sliceItem := map[string]any(nil)
 
 	scanner := bufio.NewScanner(bytes.NewReader(data))
@@ -529,7 +529,7 @@ func parsSfcList(lines []yline, start, parentIndent, depth int) ([]any, int, err
 					item[k] = nil
 				}
 			} else {
-				item[k] = parseScalar(v)
+				item[k] = parseValue(v)
 			}
 			// Continuation keys at listIndent+2
 			for newI < len(lines) {
@@ -574,7 +574,7 @@ func parsSfcList(lines []yline, start, parentIndent, depth int) ([]any, int, err
 						newI++
 					}
 				} else {
-					item[ck] = parseScalar(cv)
+					item[ck] = parseValue(cv)
 					newI++
 				}
 			}
@@ -582,7 +582,7 @@ func parsSfcList(lines []yline, start, parentIndent, depth int) ([]any, int, err
 			i = newI
 		} else {
 			// Simple scalar item
-			result = append(result, parseScalar(itemText))
+			result = append(result, parseValue(itemText))
 			i++
 		}
 	}
@@ -675,6 +675,17 @@ func parseScalar(s string) any {
 		return f
 	}
 	return s
+}
+
+func parseValue(s string) any {
+	s = strings.TrimSpace(s)
+	if len(s) > 0 && s[0] == '[' {
+		return parseFlowSeq(s)
+	}
+	if len(s) > 0 && s[0] == '{' {
+		return parseFlowMap(s)
+	}
+	return parseScalar(s)
 }
 
 func parseFlowSeq(s string) []any {

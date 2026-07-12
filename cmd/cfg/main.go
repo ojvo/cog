@@ -38,7 +38,7 @@ func main() {
 		return
 	}
 
-	cor.Info("=== Core 1.0 Unified Module Demo ===")
+	cor.Info("=== Cog Unified Module Demo ===")
 	cor.Infof("Loaded from: %s", configFile)
 
 	// 1. Global Settings (Using shorthand getters)
