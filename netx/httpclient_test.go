@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"ojv/cog/resil"
+	"c.n/ojv/cog/resil"
 )
 
 // === HTTPClient (object-oriented API) tests ===

@@ -5,8 +5,8 @@ import (
 	"sync"
 	"testing"
 
-	"ojv/cog/event"
-	"ojv/cog/store"
+	"c.n/ojv/cog/event"
+	"c.n/ojv/cog/store"
 )
 
 func newTestWALDir(t *testing.T) string {

@@ -3,7 +3,7 @@ package httputil
 import (
 	"net/http"
 
-	"ojv/cog/pipeline"
+	"c.n/ojv/cog/pipeline"
 )
 
 // Chain assembles a slice of HTTP middlewares around a handler.

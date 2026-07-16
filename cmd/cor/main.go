@@ -2,7 +2,7 @@ package main
 
 import (
 	"fmt"
-	"ojv/cog/cor"
+	"c.n/ojv/cog/cor"
 	"os"
 	"time"
 )

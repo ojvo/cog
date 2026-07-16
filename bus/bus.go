@@ -4,7 +4,7 @@ import (
 	"reflect"
 	"sync/atomic"
 
-	"ojv/cog/syncx"
+	"c.n/ojv/cog/syncx"
 )
 
 // ALL is the reserved topic that, when AllowAsterisk is enabled, also receives

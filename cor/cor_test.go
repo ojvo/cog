@@ -1,7 +1,7 @@
 package cor
 
 import (
-	"ojv/cog/cfg"
+	"c.n/ojv/cog/cfg"
 	"os"
 	"path/filepath"
 	"strings"

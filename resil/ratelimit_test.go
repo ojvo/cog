@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"ojv/cog/util"
+	"c.n/ojv/cog/util"
 )
 
 func TestRateLimiter_Allow(t *testing.T) {

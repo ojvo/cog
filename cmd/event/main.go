@@ -6,7 +6,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"ojv/cog/event"
+	"c.n/ojv/cog/event"
 )
 
 // This demo shows EventHub combination features:

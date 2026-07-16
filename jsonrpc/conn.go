@@ -8,37 +8,23 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"ojv/cog/log"
+	"c.n/ojv/cog/log"
 )
 
 // ErrConnectionClosed is returned when a Call or Notify is attempted on a
 // closed connection, or when a pending Call is woken by Close.
 var ErrConnectionClosed = errors.New("jsonrpc: connection closed")
 
-// pendingEntry holds the channel for a pending Call waiting on a response.
 type pendingEntry struct {
 	ch chan *Response
 }
 
 // Conn is a bidirectional JSON-RPC 2.0 connection over io.Reader/io.Writer.
-//
-// It supports three message directions:
-//   - client→server: Call (request+response) and Notify (one-way)
-//   - server→client: Reply (response to a server-initiated request) and
-//     inbound notifications/requests delivered via channels or handlers
-//
-// Lock split (prevents pipe write deadlock from blocking readLoop):
-//   - writeMu: protects encoder.Encode (may block on pipe write)
-//   - pendingMu: protects pending map + nextID (shared by readLoop and Call)
-//
-// Using a single mutex would deadlock: Call holds mu to write pipe → blocks,
-// readLoop can't acquire mu to dispatch response → server pipe write also
-// blocks → classic bidirectional pipe deadlock.
 type Conn struct {
 	encoder *json.Encoder
 	decoder *json.Decoder
 	writeMu sync.Mutex
-	stdin   io.Closer // closed to trigger server-side EOF (used by Close)
+	stdin   io.Closer
 
 	nextID    int64
 	pending   map[int64]*pendingEntry
@@ -53,9 +39,6 @@ type Conn struct {
 	closed      atomic.Bool
 }
 
-// NewConn creates a JSON-RPC connection and starts the read loop.
-// stdin may be nil (for server→client only scenarios); when non-nil,
-// Close will close it to unblock the decoder.
 func NewConn(r io.Reader, w io.Writer, stdin io.Closer) *Conn {
 	conn := &Conn{
 		encoder:     json.NewEncoder(w),
@@ -71,9 +54,6 @@ func NewConn(r io.Reader, w io.Writer, stdin io.Closer) *Conn {
 	return conn
 }
 
-// readLoop continuously reads JSON messages and dispatches them.
-// Exits when decoder.Decode returns an error (EOF/pipe closed/malformed)
-// or when done is closed.
 func (c *Conn) readLoop() {
 	for {
 		select {
@@ -104,13 +84,8 @@ func (c *Conn) readLoop() {
 			hasID = true
 		}
 
-		// Has ID + method: server→client request.
 		if hasID && method != "" {
-			req := &Request{
-				JSONRPC: "2.0",
-				ID:      DecodeID(idRaw),
-				Method:  method,
-			}
+			req := &Request{JSONRPC: "2.0", ID: DecodeID(idRaw), Method: method}
 			if p, ok := raw["params"]; ok {
 				req.Params = p
 			}
@@ -122,7 +97,6 @@ func (c *Conn) readLoop() {
 			continue
 		}
 
-		// Has ID, no method: response to client→server request.
 		if hasID {
 			intID, ok := ParseIDInt(idRaw)
 			if !ok {
@@ -152,7 +126,6 @@ func (c *Conn) readLoop() {
 			continue
 		}
 
-		// No ID, has method: notification.
 		if method != "" {
 			c.handlersMu.RLock()
 			handler, ok := c.handlers[method]
@@ -166,10 +139,7 @@ func (c *Conn) readLoop() {
 				continue
 			}
 
-			notif := &Notification{
-				JSONRPC: "2.0",
-				Method:  method,
-			}
+			notif := &Notification{JSONRPC: "2.0", Method: method}
 			if p, ok := raw["params"]; ok {
 				notif.Params = p
 			}
@@ -182,11 +152,6 @@ func (c *Conn) readLoop() {
 	}
 }
 
-// Call sends a request and waits for the response or ctx cancellation.
-//
-// On ctx cancellation, the pending entry is deleted to prevent a late
-// response from writing to a closed channel. On error response, returns
-// *Error preserving the server's Code.
 func (c *Conn) Call(ctx context.Context, method string, params any, result any) error {
 	if c.closed.Load() {
 		return ErrConnectionClosed
@@ -203,11 +168,7 @@ func (c *Conn) Call(ctx context.Context, method string, params any, result any) 
 	c.pending[id] = entry
 	c.pendingMu.Unlock()
 
-	req := Request{
-		JSONRPC: "2.0",
-		ID:      id,
-		Method:  method,
-	}
+	req := Request{JSONRPC: "2.0", ID: id, Method: method}
 	if params != nil {
 		p, err := json.Marshal(params)
 		if err != nil {
@@ -220,7 +181,7 @@ func (c *Conn) Call(ctx context.Context, method string, params any, result any) 
 	}
 
 	c.writeMu.Lock()
-	err := c.encoder.Encode(req)
+	err := c.encoder.Encode(&req)
 	c.writeMu.Unlock()
 	if err != nil {
 		c.pendingMu.Lock()
@@ -230,6 +191,16 @@ func (c *Conn) Call(ctx context.Context, method string, params any, result any) 
 	}
 
 	select {
+	case <-ctx.Done():
+		c.pendingMu.Lock()
+		delete(c.pending, id)
+		c.pendingMu.Unlock()
+		return ctx.Err()
+	case <-c.done:
+		c.pendingMu.Lock()
+		delete(c.pending, id)
+		c.pendingMu.Unlock()
+		return ErrConnectionClosed
 	case resp := <-entry.ch:
 		if resp == nil {
 			return ErrConnectionClosed
@@ -237,91 +208,59 @@ func (c *Conn) Call(ctx context.Context, method string, params any, result any) 
 		if resp.Error != nil {
 			return resp.Error
 		}
-		if result != nil && resp.Result != nil {
+		if result != nil && len(resp.Result) > 0 {
 			return json.Unmarshal(resp.Result, result)
 		}
 		return nil
-	case <-ctx.Done():
-		c.pendingMu.Lock()
-		delete(c.pending, id)
-		c.pendingMu.Unlock()
-		return ctx.Err()
 	}
 }
 
-// Notify sends a one-way notification (no ID, no response).
 func (c *Conn) Notify(method string, params any) error {
 	if c.closed.Load() {
 		return ErrConnectionClosed
 	}
-	notif := Notification{
-		JSONRPC: "2.0",
-		Method:  method,
-	}
+	n := Notification{JSONRPC: "2.0", Method: method}
 	if params != nil {
 		p, err := json.Marshal(params)
 		if err != nil {
 			return err
 		}
-		notif.Params = p
+		n.Params = p
 	}
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
-	return c.encoder.Encode(notif)
+	return c.encoder.Encode(&n)
 }
 
-// Reply sends a response to a server→client request.
-func (c *Conn) Reply(id any, result any) error {
+func (c *Conn) Reply(id ID, result any, rpcErr *Error) error {
 	if c.closed.Load() {
 		return ErrConnectionClosed
 	}
-	resp := Response{
-		JSONRPC: "2.0",
-		ID:      id,
-	}
-	if result != nil {
-		r, err := json.Marshal(result)
+	resp := Response{JSONRPC: "2.0", ID: id, Error: rpcErr}
+	if rpcErr == nil && result != nil {
+		p, err := json.Marshal(result)
 		if err != nil {
 			return err
 		}
-		resp.Result = r
+		resp.Result = p
 	}
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
-	return c.encoder.Encode(resp)
+	return c.encoder.Encode(&resp)
 }
 
-// OnNotification registers a handler for the given method.
-// readLoop will invoke the handler directly when a matching notification arrives.
-// A nil handler unregisters.
-func (c *Conn) OnNotification(method string, handler func(json.RawMessage)) {
+func (c *Conn) OnNotification(method string, fn func(json.RawMessage)) {
 	c.handlersMu.Lock()
 	defer c.handlersMu.Unlock()
-	c.handlers[method] = handler
+	c.handlers[method] = fn
 }
 
-// Notifications returns the channel for notifications without a registered handler.
-func (c *Conn) Notifications() <-chan *Notification {
-	return c.notifyChan
-}
+func (c *Conn) Notifications() <-chan *Notification { return c.notifyChan }
+func (c *Conn) Requests() <-chan *Request         { return c.requestChan }
 
-// Requests returns the channel for server→client requests.
-func (c *Conn) Requests() <-chan *Request {
-	return c.requestChan
-}
-
-// Done returns a channel that is closed when the connection is closed,
-// allowing goroutines to exit select loops.
-func (c *Conn) Done() <-chan struct{} {
-	return c.done
-}
-
-// Close closes the connection. Closes done + stdin to unblock readLoop.
-// Wakes all pending Call goroutines with ErrConnectionClosed.
-// Idempotent.
-func (c *Conn) Close() {
+func (c *Conn) Close() error {
 	if !c.closed.CompareAndSwap(false, true) {
-		return
+		return nil
 	}
 	close(c.done)
 	if c.stdin != nil {
@@ -329,36 +268,9 @@ func (c *Conn) Close() {
 	}
 	c.pendingMu.Lock()
 	for id, entry := range c.pending {
-		select {
-		case entry.ch <- nil:
-		default:
-		}
 		delete(c.pending, id)
+		close(entry.ch)
 	}
 	c.pendingMu.Unlock()
-}
-
-// DecodeID decodes a json.RawMessage ID to any (preserving number/string/null).
-func DecodeID(raw json.RawMessage) any {
-	if string(raw) == "null" {
-		return nil
-	}
-	var i int64
-	if err := json.Unmarshal(raw, &i); err == nil {
-		return i
-	}
-	var s string
-	if err := json.Unmarshal(raw, &s); err == nil {
-		return s
-	}
 	return nil
-}
-
-// ParseIDInt decodes a json.RawMessage ID to int64 (numbers only).
-func ParseIDInt(raw json.RawMessage) (int64, bool) {
-	var i int64
-	if err := json.Unmarshal(raw, &i); err == nil {
-		return i, true
-	}
-	return 0, false
 }

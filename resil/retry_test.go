@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"ojv/cog/util"
+	"c.n/ojv/cog/util"
 )
 
 func TestRetry_Success(t *testing.T) {

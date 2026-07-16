@@ -2,8 +2,8 @@ package main
 
 import (
 	"fmt"
-	"ojv/cog/cfg"
-	"ojv/cog/cor"
+	"c.n/ojv/cog/cfg"
+	"c.n/ojv/cog/cor"
 	"os"
 	"strings"
 )

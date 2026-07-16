@@ -15,7 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"ojv/cog/resil"
+	"c.n/ojv/cog/resil"
 )
 
 // HTTPClientConfig configures an HTTPClient.

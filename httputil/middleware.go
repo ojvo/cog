@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"ojv/cog/log"
+	"c.n/ojv/cog/log"
 )
 
 const traceIDHeader = "X-Request-Id"

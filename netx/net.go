@@ -1,15 +1,13 @@
 package netx
 
 import (
-	"math/rand"
 	"net"
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
 	"strings"
-	"time"
 
-	"ojv/cog/log"
+	"c.n/ojv/cog/log"
 )
 
 // GetIntranetIP returns the first non-loopback IPv4 address of the machine.
@@ -100,19 +98,9 @@ func CreateCookieJar() (http.CookieJar, error) {
 }
 
 // === User-Agent utilities ===
-
-var defaultUserAgents = []string{
-	"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-	"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.1.1 Safari/605.1.15",
-	"Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:89.0) Gecko/20100101 Firefox/89.0",
-	"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.114 Safari/537.36",
-}
-
-// GetRandomUserAgent returns a random User-Agent string.
-func GetRandomUserAgent() string {
-	r := rand.New(rand.NewSource(time.Now().UnixNano()))
-	return defaultUserAgents[r.Intn(len(defaultUserAgents))]
-}
+//
+// GetRandomUserAgent and UserAgentRandomizer are defined in uarand.go.
+// The defaultUserAgents list is in useragents.go.
 
 // === Request utilities ===
 

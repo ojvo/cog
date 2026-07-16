@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"ojv/cog/diag"
+	"c.n/ojv/cog/diag"
 )
 
 func TestGoroutineLeaks_None(t *testing.T) {

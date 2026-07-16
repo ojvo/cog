@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"ojv/cog/util"
+	"c.n/ojv/cog/util"
 )
 
 func TestBackoff_Defaults(t *testing.T) {

@@ -6,8 +6,8 @@ import (
 	"path/filepath"
 	"sync"
 
-	"ojv/cog/httputil"
-	"ojv/cog/log"
+	"c.n/ojv/cog/httputil"
+	"c.n/ojv/cog/log"
 )
 
 // Checker is the contract for a readiness probe.

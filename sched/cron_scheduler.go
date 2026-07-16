@@ -9,7 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"ojv/cog/log"
+	"c.n/ojv/cog/log"
 )
 
 const (

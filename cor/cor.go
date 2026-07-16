@@ -2,8 +2,8 @@ package cor
 
 import (
 	"fmt"
-	"ojv/cog/cfg"
-	"ojv/cog/log"
+	"c.n/ojv/cog/cfg"
+	"c.n/ojv/cog/log"
 	"os"
 	"path/filepath"
 	"strings"

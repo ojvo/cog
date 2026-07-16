@@ -5,7 +5,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"ojv/cog/conc"
+	"c.n/ojv/cog/conc"
 )
 
 // This demo shows WorkerPool + LockFreeQueue combination:

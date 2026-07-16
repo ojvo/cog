@@ -17,17 +17,31 @@ import (
 type Bytes []byte
 type Bs = Bytes // 简写
 
+// NewBs converts v into Bytes.
+func NewBs(v interface{}) Bs {
+	switch x := v.(type) {
+	case nil:
+		return nil
+	case []byte:
+		return Bytes(x)
+	case string:
+		return Bytes(x)
+	default:
+		return Bytes([]byte(strconv.FormatBool(v == x)))
+	}
+}
+
 /* ------------- 基础接口 ------------- */
 
 func (b Bytes) Len() int          { return len(b) }
 func (b Bytes) Cap() int          { return cap(b) }
-func (b Bytes) Error() string     { return b.String() }         // 使 Bytes 实现 error
-func (b Bytes) Bytes() []byte     { return b }                  // 原始切片
-func (b Bytes) Reader() io.Reader { return bytes.NewReader(b) } // io.Reader
+func (b Bytes) Error() string     { return b.String() }
+func (b Bytes) Bytes() []byte     { return b }
+func (b Bytes) Reader() io.Reader { return bytes.NewReader(b) }
 func (b Bytes) Buffer() *bytes.Buffer {
-	return bytes.NewBuffer(b.Copy()) // 拷贝一份，避免复用时污染
+	return bytes.NewBuffer(b.Copy())
 }
-func (b Bytes) WriteTo(w io.Writer) (int64, error) { // io.WriterTo
+func (b Bytes) WriteTo(w io.Writer) (int64, error) {
 	n, err := w.Write(b)
 	return int64(n), err
 }
@@ -48,11 +62,10 @@ func (b Bytes) Equal(other Bytes) bool {
 }
 
 func (b Bytes) Append(p ...byte) Bytes { return append(b, p...) }
+func (b Bytes) Upper() Bytes           { return bytes.ToUpper(b) }
+func (b Bytes) Lower() Bytes           { return bytes.ToLower(b) }
 
-func (b Bytes) Upper() Bytes { return bytes.ToUpper(b) }
-func (b Bytes) Lower() Bytes { return bytes.ToLower(b) }
-
-func (b Bytes) Sum() byte { // 所有字节累加，溢出按 uint8 规则回绕
+func (b Bytes) Sum() byte {
 	var s byte
 	for _, v := range b {
 		s += v
@@ -68,25 +81,24 @@ func (b Bytes) ASCII() string  { return string(b) }
 func (b Bytes) HEX() string    { return hex.EncodeToString(b) }
 func (b Bytes) Base64() string { return base64.StdEncoding.EncodeToString(b) }
 func (b Bytes) HEXBase64() string {
-	return Bytes(b.HEX()).Base64() // 先转 HEX 再转 Base64
+	return Bytes(b.HEX()).Base64()
 }
 
 /* ------------- 数值解析 ------------- */
 
-func (b Bytes) GetFirst() byte { // 不存在返回 0
+func (b Bytes) GetFirst() byte {
 	if len(b) > 0 {
 		return b[0]
 	}
 	return 0
 }
-func (b Bytes) GetLast() byte { // 不存在返回 0
+func (b Bytes) GetLast() byte {
 	if l := len(b); l > 0 {
 		return b[l-1]
 	}
 	return 0
 }
 
-// 大端转 uint64；超过 8 字节时保留低 8 字节；不足时高位补 0。
 func (b Bytes) Uint64() uint64 {
 	if len(b) == 0 {
 		return 0
@@ -95,13 +107,17 @@ func (b Bytes) Uint64() uint64 {
 		b = b[len(b)-8:]
 	}
 	var buf [8]byte
-	copy(buf[8-len(b):], b) // 高位填 0
+	copy(buf[8-len(b):], b)
 	return binary.BigEndian.Uint64(buf[:])
 }
 func (b Bytes) Int64() int64 { return int64(b.Uint64()) }
+func (b Bytes) Uint() uint   { return uint(b.Uint64()) }
+func (b Bytes) Int() int     { return int(b.Int64()) }
+func (b Bytes) Uint8() uint8 { return uint8(b.Uint64()) }
+func (b Bytes) Int8() int8   { return int8(b.Int64()) }
 
-// ASCII 数字串 → int
 func (b Bytes) ASCIIToInt() (int, error) { return strconv.Atoi(b.ASCII()) }
+func (b Bytes) UTF8ToInt() (int, error)  { return b.ASCIIToInt() }
 func (b Bytes) ASCIIToFloat64(decimals int) (float64, error) {
 	i, err := b.ASCIIToInt()
 	if err != nil {
@@ -109,8 +125,8 @@ func (b Bytes) ASCIIToFloat64(decimals int) (float64, error) {
 	}
 	return float64(i) / math.Pow10(decimals), nil
 }
+func (b Bytes) UTF8ToFloat64(decimals int) (float64, error) { return b.ASCIIToFloat64(decimals) }
 
-// HEX 编码 → int（16 进制解析）
 func (b Bytes) HEXToInt() (int, error) {
 	v, err := strconv.ParseInt(b.HEX(), 16, 64)
 	return int(v), err
@@ -125,9 +141,14 @@ func (b Bytes) HEXToFloat64(decimals int) (float64, error) {
 
 /* ------------- 进制字符串 ------------- */
 
-// 二进制字符串（无空格，一字节 8 位）
 func (b Bytes) BINStr() string { return byteToBinStr(b) }
 func (b Bytes) BIN() string    { return byteToBinStr(b) }
+func (b Bytes) OCT() string {
+	if len(b) == 0 {
+		return strings.Repeat("0", 22)
+	}
+	return fmtOctUint64(b.Uint64())
+}
 
 func byteToBinStr(bs []byte) string {
 	if len(bs) == 0 {
@@ -147,6 +168,17 @@ func byteToBinStr(bs []byte) string {
 	return sb.String()
 }
 
+func fmtOctUint64(n uint64) string {
+	if n == 0 {
+		return strings.Repeat("0", 21) + "0"
+	}
+	s := strconv.FormatUint(n, 8)
+	if len(s) >= 22 {
+		return s
+	}
+	return strings.Repeat("0", 22-len(s)) + s
+}
+
 /* ------------- 顺序/位运算 ------------- */
 
 func (b Bytes) Reverse() Bytes {
@@ -162,7 +194,6 @@ func (b Bytes) ReverseASCII() string  { return b.Reverse().ASCII() }
 func (b Bytes) ReverseHEX() string    { return b.Reverse().HEX() }
 func (b Bytes) ReverseBase64() string { return b.Reverse().Base64() }
 
-// Sub subtracts sub from each byte.
 func (b Bytes) Sub(sub byte) Bytes {
 	res := make([]byte, len(b))
 	for i, v := range b {
@@ -170,11 +201,8 @@ func (b Bytes) Sub(sub byte) Bytes {
 	}
 	return res
 }
-
-// SubByte is an alias for Sub.
 func (b Bytes) SubByte(sub byte) Bytes { return b.Sub(sub) }
 
-// Add adds add to each byte.
 func (b Bytes) Add(add byte) Bytes {
 	res := make([]byte, len(b))
 	for i, v := range b {
@@ -182,8 +210,6 @@ func (b Bytes) Add(add byte) Bytes {
 	}
 	return res
 }
-
-// AddByte is an alias for Add.
 func (b Bytes) AddByte(add byte) Bytes { return b.Add(add) }
 
 func Reverse(bs []byte) []byte {
@@ -196,7 +222,6 @@ func Reverse(bs []byte) []byte {
 
 /* ------------- 多字节整数解析 (大端) ------------- */
 
-// Uint16 interprets first 2 bytes as big-endian uint16.
 func (b Bytes) Uint16() uint16 {
 	if len(b) >= 2 {
 		return binary.BigEndian.Uint16(b)
@@ -205,11 +230,8 @@ func (b Bytes) Uint16() uint16 {
 	copy(buf[2-len(b):], b)
 	return binary.BigEndian.Uint16(buf[:])
 }
-
-// Int16 returns int16(b.Uint16()).
 func (b Bytes) Int16() int16 { return int16(b.Uint16()) }
 
-// Uint32 interprets first 4 bytes as big-endian uint32.
 func (b Bytes) Uint32() uint32 {
 	if len(b) >= 4 {
 		return binary.BigEndian.Uint32(b)
@@ -218,13 +240,24 @@ func (b Bytes) Uint32() uint32 {
 	copy(buf[4-len(b):], b)
 	return binary.BigEndian.Uint32(buf[:])
 }
-
-// Int32 returns int32(b.Uint32()).
 func (b Bytes) Int32() int32 { return int32(b.Uint32()) }
+
+func (b Bytes) Float64frombits() float64 { return math.Float64frombits(b.Uint64()) }
+func (b Bytes) Float32frombits() float32 { return math.Float32frombits(b.Uint32()) }
+func (b Bytes) Float64() float64 {
+	if len(b) <= 4 {
+		return float64(b.Float32frombits())
+	}
+	return b.Float64frombits()
+}
+func (b Bytes) Float32() float32 { return float32(b.Float64()) }
+func (b Bytes) Float() float64   { return b.Float64() }
+func (b Bytes) Bool() bool {
+	return len(b) > 0 && !(len(b) == 1 && b[0] == 0)
+}
 
 /* ------------- 负索引访问 ------------- */
 
-// Get returns byte at idx, supporting negative index (Python-style: -1 = last).
 func (b Bytes) Get(idx int) byte {
 	if i := b.getIdx(idx); i >= 0 {
 		return b[i]
@@ -245,7 +278,6 @@ func (b Bytes) getIdx(idx int) int {
 
 /* ------------- 分割与查找 ------------- */
 
-// Split splits by sep into []Bytes.
 func (b Bytes) Split(sep []byte) []Bytes {
 	parts := bytes.Split(b, sep)
 	result := make([]Bytes, len(parts))
@@ -255,7 +287,6 @@ func (b Bytes) Split(sep []byte) []Bytes {
 	return result
 }
 
-// SplitByLength splits into chunks of the given length.
 func (b Bytes) SplitByLength(length int) []Bytes {
 	if length <= 0 {
 		return nil
@@ -268,33 +299,21 @@ func (b Bytes) SplitByLength(length int) []Bytes {
 	return append(result, b)
 }
 
-// TrimSpace removes leading/trailing whitespace.
-func (b Bytes) TrimSpace() Bytes { return bytes.TrimSpace(b) }
-
-// Contains reports whether subslice is present.
-func (b Bytes) Contains(sub []byte) bool { return bytes.Contains(b, sub) }
-
-// HasPrefix reports whether b begins with prefix.
+func (b Bytes) TrimSpace() Bytes            { return bytes.TrimSpace(b) }
+func (b Bytes) Contains(sub []byte) bool    { return bytes.Contains(b, sub) }
 func (b Bytes) HasPrefix(prefix []byte) bool { return bytes.HasPrefix(b, prefix) }
-
-// HasSuffix reports whether b ends with suffix.
 func (b Bytes) HasSuffix(suffix []byte) bool { return bytes.HasSuffix(b, suffix) }
 
 /* ------------- 哈希 ------------- */
 
-// Md5 returns the MD5 hex digest of b.
 func (b Bytes) Md5() string {
 	sum := md5.Sum(b)
 	return hex.EncodeToString(sum[:])
 }
-
-// Sha1 returns the SHA1 hex digest of b.
 func (b Bytes) Sha1() string {
 	sum := sha1.Sum(b)
 	return hex.EncodeToString(sum[:])
 }
-
-// Sha256 returns the SHA256 hex digest of b.
 func (b Bytes) Sha256() string {
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])
@@ -302,16 +321,10 @@ func (b Bytes) Sha256() string {
 
 /* ------------- 字节序重排 ------------- */
 
-// Endian reorders bytes by a positional pattern string.
-// Each digit '1'-'9' selects a byte from the current group; '_' skips a position.
-// Example: {11,12,13,14,15,16,17,18} "21" → {12,11,14,13,16,15,18,17}
-//
-//	{11,12,13,14,15,16,17,18} "4321" → {14,13,12,11,18,17,16,15}
 func (b Bytes) Endian(order string) Bytes {
 	if len(b) == 0 || len(order) == 0 {
 		return nil
 	}
-
 	effLen := 0
 	for i := 0; i < len(order); i++ {
 		if order[i] != '_' {
@@ -321,10 +334,8 @@ func (b Bytes) Endian(order string) Bytes {
 	if effLen == 0 {
 		return nil
 	}
-
-	cap := len(b) * effLen / len(order)
-	result := make(Bytes, 0, cap+1)
-
+	capHint := len(b) * effLen / len(order)
+	result := make(Bytes, 0, capHint+1)
 	sub := 0
 	for i := 0; ; i++ {
 		baseIdx := i * len(order)

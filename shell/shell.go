@@ -14,7 +14,7 @@ import (
 	"sync"
 	"time"
 
-	"ojv/cog/procmgmt"
+	"c.n/ojv/cog/procmgmt"
 )
 
 // Errors returned by Cmd operations.

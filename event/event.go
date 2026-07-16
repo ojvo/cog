@@ -7,7 +7,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"ojv/cog/conc"
+	"c.n/ojv/cog/conc"
 )
 
 // Event 事件结构
