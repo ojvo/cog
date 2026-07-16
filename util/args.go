@@ -826,7 +826,7 @@ func ArgParse(args []string, setup func(*ArgParser)) (*ArgParseResult, error) {
 	result := parser.Parse(args)
 	
 	if result.HasErrors() {
-		return result, fmt.Errorf(result.Error())
+		return result, errors.New(result.Error())
 	}
 	
 	return result, nil

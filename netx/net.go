@@ -113,3 +113,24 @@ func GetRandomUserAgent() string {
 	r := rand.New(rand.NewSource(time.Now().UnixNano()))
 	return defaultUserAgents[r.Intn(len(defaultUserAgents))]
 }
+
+// === Request utilities ===
+
+// GetIPAddress extracts the client's real IP address from an HTTP request,
+// checking X-Forwarded-For, X-Real-IP, and X-Client-IP headers in order
+// before falling back to RemoteAddr.
+func GetIPAddress(r *http.Request) string {
+	for _, header := range []string{"X-Forwarded-For", "X-Real-IP", "X-Client-IP"} {
+		if val := r.Header.Get(header); val != "" {
+			// X-Forwarded-For can contain multiple IPs; the first is the client
+			parts := strings.SplitN(val, ",", 2)
+			if ip := strings.TrimSpace(parts[0]); ip != "" {
+				return ip
+			}
+		}
+	}
+	if ip, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		return ip
+	}
+	return r.RemoteAddr
+}

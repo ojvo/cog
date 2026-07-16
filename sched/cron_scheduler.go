@@ -18,10 +18,11 @@ const (
 )
 
 var (
-	ErrNotFoundJob     = errors.New("not found job")
-	ErrAlreadyRegister = errors.New("the job already in pool")
-	ErrJobDOFuncNil    = errors.New("callback func is nil")
-	ErrCronSpecInvalid = errors.New("crontab spec is invalid")
+	ErrNotFoundJob      = errors.New("not found job")
+	ErrAlreadyRegister  = errors.New("the job already in pool")
+	ErrJobDOFuncNil     = errors.New("callback func is nil")
+	ErrCronSpecInvalid  = errors.New("crontab spec is invalid")
+	ErrSchedulerStopped = errors.New("cron scheduler already stopped")
 )
 
 // null logger
@@ -61,8 +62,9 @@ type CronSchduler struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	wg   *sync.WaitGroup
-	once *sync.Once
+	wg      *sync.WaitGroup
+	once    *sync.Once
+	stopped atomic.Bool
 
 	sync.RWMutex
 }
@@ -84,8 +86,17 @@ func (c *CronSchduler) DynamicRegister(srv string, model *JobModel) error {
 
 // reset - reset srv model
 func (c *CronSchduler) reset(srv string, model *JobModel, denyReplace, autoStart bool) error {
+	if c.stopped.Load() {
+		return ErrSchedulerStopped
+	}
+
 	c.Lock()
 	defer c.Unlock()
+
+	// double-check under lock to avoid race with Stop()
+	if c.stopped.Load() {
+		return ErrSchedulerStopped
+	}
 
 	// validate model
 	err := model.validate()
@@ -131,10 +142,13 @@ func (c *CronSchduler) UnRegister(srv string) error {
 	return nil
 }
 
-// Stop - stop all cron job
+// Stop - stop all cron job. After Stop, the scheduler is terminal:
+// any subsequent Register/DynamicRegister/UpdateJobModel returns ErrSchedulerStopped.
 func (c *CronSchduler) Stop() {
 	c.Lock()
 	defer c.Unlock()
+
+	c.stopped.Store(true)
 
 	for srv, job := range c.tasks {
 		job.kill()

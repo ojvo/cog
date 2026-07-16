@@ -264,6 +264,11 @@ func (bus *EventHub) Subscribe(eventType string, handler EventHandler) string {
 
 // Publish 发布事件
 func (bus *EventHub) Publish(event Event) {
+	if bus.hubClosed.Load() {
+		bus.logf("WARN", "EventHub已关闭，忽略事件 %s", event.Type)
+		bus.incEventDropped(event.Type)
+		return
+	}
 	if event.Type == "" {
 		bus.logf("ERROR", "尝试发布空类型事件")
 		return
@@ -304,10 +309,13 @@ func (bus *EventHub) Publish(event Event) {
 
 		if sub.Options.Async {
 			if bus.config.UseWorkerPool && bus.workerPool != nil {
-				// 使用工作池
-				bus.workerPool.Submit(func() {
+				// 使用工作池，检查返回值
+				if !bus.workerPool.Submit(func() {
 					bus.executeHandler(currentSub, currentEvent)
-				})
+				}) {
+					bus.incEventDropped(currentEvent.Type)
+					bus.logf("WARN", "工作池不可用，丢弃事件 %s (ID: %s)", currentEvent.Type, currentEvent.EventID)
+				}
 			} else {
 				// 使用goroutine
 				go bus.executeHandler(currentSub, currentEvent)
@@ -433,6 +441,11 @@ func (bus *EventHub) isEventProcessed(eventID string) bool {
 
 // PublishAndWait 发布事件并等待所有处理完成
 func (bus *EventHub) PublishAndWait(event Event) []error {
+	if bus.hubClosed.Load() {
+		bus.logf("WARN", "EventHub已关闭，忽略事件 %s", event.Type)
+		bus.incEventDropped(event.Type)
+		return []error{fmt.Errorf("EventHub已关闭")}
+	}
 	if event.Type == "" {
 		return []error{fmt.Errorf("尝试发布空类型事件")}
 	}
@@ -794,11 +807,13 @@ func (bus *EventHub) checkRateLimit() bool {
 
 func (bus *EventHub) submitTask(task func()) {
 	if bus.config.UseWorkerPool && bus.workerPool != nil {
-		bus.workerPool.Submit(task)
-	} else {
-		// 如果没有工作池，直接执行或使用 goroutine
-		go task()
+		if bus.workerPool.Submit(task) {
+			return
+		}
+		// 工作池不可用，fallback 到 goroutine 保证回调不丢失
+		bus.logf("WARN", "工作池不可用，回调降级为 goroutine 执行")
 	}
+	go task()
 }
 
 // 提取请求处理公共逻辑

@@ -756,3 +756,109 @@ func TestEventHub_GetSnapshot(t *testing.T) {
 		t.Error("expected Closed=true after Close")
 	}
 }
+
+func TestEventHub_PublishAfterCloseDropped(t *testing.T) {
+	config := DefaultEventHubConfig()
+	config.UseWorkerPool = false
+	bus := NewEventHub(config)
+
+	var called atomic.Int32
+	bus.Subscribe("closed_event", func(e Event) error {
+		called.Add(1)
+		return nil
+	})
+
+	bus.Close()
+	bus.Publish(NewEvent("closed_event", "x"))
+
+	if called.Load() != 0 {
+		t.Fatalf("handler should not run after Close, got %d", called.Load())
+	}
+	metrics := bus.GetEventMetrics()["closed_event"]
+	if metrics["processed"] != 0 {
+		t.Fatalf("processed after Close = %d, want 0", metrics["processed"])
+	}
+	if metrics["dropped"] != 1 {
+		t.Fatalf("dropped after Close = %d, want 1", metrics["dropped"])
+	}
+}
+
+func TestEventHub_PublishAsync_WorkerPoolSubmitFailure(t *testing.T) {
+	config := DefaultEventHubConfig()
+	config.UseWorkerPool = true
+	bus := NewEventHub(config)
+
+	var called atomic.Int32
+	opts := DefaultHandlerOptions()
+	opts.Async = true
+	bus.SubscribeWithOptions("wp_fail_event", func(e Event) error {
+		called.Add(1)
+		return nil
+	}, opts)
+
+	bus.workerPool.Stop()
+
+	bus.Publish(NewEvent("wp_fail_event", "x"))
+
+	if called.Load() != 0 {
+		t.Fatalf("handler should not run when worker pool rejected Submit, got %d", called.Load())
+	}
+	metrics := bus.GetEventMetrics()["wp_fail_event"]
+	if metrics["dropped"] != 1 {
+		t.Fatalf("dropped = %d, want 1", metrics["dropped"])
+	}
+
+	bus.Close()
+}
+
+func TestEventHub_PublishAndWaitAfterClose(t *testing.T) {
+	config := DefaultEventHubConfig()
+	config.UseWorkerPool = false
+	bus := NewEventHub(config)
+
+	bus.Subscribe("pwac_event", func(e Event) error {
+		return nil
+	})
+
+	bus.Close()
+	errs := bus.PublishAndWait(NewEvent("pwac_event", "x"))
+
+	if len(errs) == 0 {
+		t.Fatal("expected error from PublishAndWait after Close")
+	}
+	metrics := bus.GetEventMetrics()["pwac_event"]
+	if metrics["dropped"] != 1 {
+		t.Fatalf("dropped = %d, want 1", metrics["dropped"])
+	}
+}
+
+func TestEventHub_submitTask_FallbackOnWorkerPoolFailure(t *testing.T) {
+	config := DefaultEventHubConfig()
+	config.UseWorkerPool = true
+	bus := NewEventHub(config)
+
+	var onErrorCalled atomic.Int32
+	opts := HandlerOptions{
+		Async:   false,
+		OnError: func(e Event, err error) {
+			onErrorCalled.Add(1)
+		},
+	}
+	bus.SubscribeWithOptions("fb_event", func(e Event) error {
+		return errors.New("trigger OnError")
+	}, opts)
+
+	bus.workerPool.Stop()
+
+	bus.Publish(NewEvent("fb_event", "x"))
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && onErrorCalled.Load() == 0 {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if onErrorCalled.Load() != 1 {
+		t.Fatalf("OnError callback should run via goroutine fallback, got %d", onErrorCalled.Load())
+	}
+
+	bus.Close()
+}

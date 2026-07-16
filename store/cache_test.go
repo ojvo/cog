@@ -130,7 +130,7 @@ func TestCache_DeleteExpired(t *testing.T) {
 
 func TestCache_OnEvicted(t *testing.T) {
 	c := NewCache(WithDefaultExpiration(DefaultExpiration))
-	
+
 	evictedKey := ""
 	c.OnEvicted(func(k string, v interface{}) {
 		evictedKey = k
@@ -142,6 +142,62 @@ func TestCache_OnEvicted(t *testing.T) {
 	if evictedKey != "foo" {
 		t.Error("OnEvicted not called")
 	}
+}
+
+// TestCache_Delete_OnEvictedConcurrentNil verifies Delete does not panic when
+// OnEvicted is concurrently set to nil after the delete decision but before the
+// callback invocation.
+func TestCache_Delete_OnEvictedConcurrentNil(t *testing.T) {
+	c := NewCache(WithDefaultExpiration(DefaultExpiration))
+
+	c.OnEvicted(func(k string, v interface{}) {})
+
+	c.Set("k1", "v1", DefaultExpiration)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 100; i++ {
+			c.OnEvicted(nil)
+			c.OnEvicted(func(k string, v interface{}) {})
+		}
+	}()
+
+	for i := 0; i < 100; i++ {
+		c.Set("k1", "v1", DefaultExpiration)
+		c.Delete("k1")
+	}
+
+	<-done
+}
+
+// TestCache_DeleteExpired_OnEvictedCallbackSnapshot verifies DeleteExpired
+// captures the onEvicted snapshot under the lock so a concurrent OnEvicted(nil)
+// does not cause a nil-call panic.
+func TestCache_DeleteExpired_OnEvictedCallbackSnapshot(t *testing.T) {
+	c := NewCache(WithDefaultExpiration(10 * time.Millisecond))
+
+	c.OnEvicted(func(k string, v interface{}) {})
+
+	c.Set("exp1", "v1", 10*time.Millisecond)
+	c.Set("exp2", "v2", 10*time.Millisecond)
+
+	time.Sleep(30 * time.Millisecond)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 100; i++ {
+			c.OnEvicted(nil)
+			c.OnEvicted(func(k string, v interface{}) {})
+		}
+	}()
+
+	for i := 0; i < 100; i++ {
+		c.DeleteExpired()
+	}
+
+	<-done
 }
 
 func TestCache_Concurrency(t *testing.T) {

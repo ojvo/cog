@@ -284,3 +284,22 @@ func mapToValues(m map[string]string) url.Values {
 	}
 	return values
 }
+
+// HeaderFromStruct converts a struct to a map[string]string header map
+// via JSON marshaling. Struct field names become header keys (as-is from JSON),
+// and values are stringified with fmt.Sprint.
+func HeaderFromStruct(v interface{}) (map[string]string, error) {
+	data, err := json.Marshal(v)
+	if err != nil {
+		return nil, fmt.Errorf("marshal struct: %w", err)
+	}
+	var m map[string]interface{}
+	if err := json.Unmarshal(data, &m); err != nil {
+		return nil, fmt.Errorf("unmarshal to header map: %w", err)
+	}
+	result := make(map[string]string, len(m))
+	for k, v := range m {
+		result[k] = fmt.Sprint(v)
+	}
+	return result, nil
+}

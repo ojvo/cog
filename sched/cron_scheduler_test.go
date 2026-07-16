@@ -210,6 +210,27 @@ func TestCronScheduler_StopServicePrefix(t *testing.T) {
 	}
 }
 
+// TestCronScheduler_RegisterAfterStop verifies that after Stop the scheduler
+// is terminal: Register/DynamicRegister/UpdateJobModel all return
+// ErrSchedulerStopped instead of silently registering jobs that can never run.
+func TestCronScheduler_RegisterAfterStop(t *testing.T) {
+	cron := NewCron()
+	cron.Start()
+	cron.Stop()
+
+	job, _ := NewJobModel("* * * * * *", func() {})
+
+	if err := cron.Register("after_stop", job); err != ErrSchedulerStopped {
+		t.Errorf("Register after Stop = %v, want ErrSchedulerStopped", err)
+	}
+	if err := cron.DynamicRegister("after_stop_dyn", job); err != ErrSchedulerStopped {
+		t.Errorf("DynamicRegister after Stop = %v, want ErrSchedulerStopped", err)
+	}
+	if err := cron.UpdateJobModel("after_stop", job); err != ErrSchedulerStopped {
+		t.Errorf("UpdateJobModel after Stop = %v, want ErrSchedulerStopped", err)
+	}
+}
+
 func TestCronScheduler_JobOptions(t *testing.T) {
 	cron := NewCron()
 	defer cron.Stop()

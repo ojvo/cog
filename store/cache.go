@@ -807,9 +807,10 @@ func (c *cache) DecrementFloat64(k string, n float64) (float64, error) {
 func (c *cache) Delete(k string) {
 	c.mu.Lock()
 	v, evicted := c.delete(k)
+	onEvicted := c.onEvicted
 	c.mu.Unlock()
-	if evicted {
-		c.onEvicted(k, v)
+	if evicted && onEvicted != nil {
+		onEvicted(k, v)
 	}
 }
 
@@ -834,6 +835,7 @@ func (c *cache) DeleteExpired() {
 	var evictedItems []keyAndValue
 	now := time.Now().UnixNano()
 	c.mu.Lock()
+	onEvicted := c.onEvicted
 	for k, v := range c.items {
 		// "Inlining" of expired
 		if v.Expiration > 0 && now > v.Expiration {
@@ -844,8 +846,11 @@ func (c *cache) DeleteExpired() {
 		}
 	}
 	c.mu.Unlock()
+	if onEvicted == nil {
+		return
+	}
 	for _, v := range evictedItems {
-		c.onEvicted(v.key, v.value)
+		onEvicted(v.key, v.value)
 	}
 }
 

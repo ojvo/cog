@@ -133,10 +133,19 @@ func NewHTTPClient(config HTTPClientConfig) *HTTPClient {
 		}
 	}
 
+	// Deep copy headers to avoid aliasing the caller's map
+	var headers map[string]string
+	if config.Headers != nil {
+		headers = make(map[string]string, len(config.Headers))
+		for k, v := range config.Headers {
+			headers[k] = v
+		}
+	}
+
 	return &HTTPClient{
 		client:          client,
 		baseURL:         config.BaseURL,
-		headers:         config.Headers,
+		headers:         headers,
 		debug:           config.Debug,
 		maxRetries:      config.MaxRetries,
 		retryFunc:       config.RetryFunc,
@@ -161,9 +170,10 @@ func (c *HTTPClient) GetStats() HTTPClientStats {
 func (c *HTTPClient) Do(ctx context.Context, req ClientRequest) (*ClientResponse, error) {
 	atomic.AddInt64(&c.requestTotal, 1)
 
-	// Rate limiting
+	// Rate limiting - use per-client limiter instead of global singleton
+	// to ensure different clients with different configs are isolated.
 	if c.rateLimitConfig != nil && c.rateLimitConfig.RateLimit > 0 {
-		limiter := resil.GetGlobalRateLimiter(c.rateLimitConfig)
+		limiter := resil.NewRateLimiter(c.rateLimitConfig)
 		if err := limiter.Wait(); err != nil {
 			atomic.AddInt64(&c.errorTotal, 1)
 			return nil, fmt.Errorf("rate limit wait timeout: %w", err)

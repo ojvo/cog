@@ -393,6 +393,78 @@ func TestHTTPClient_RateLimit(t *testing.T) {
 	}
 }
 
+// TestHTTPClient_HeadersDeepCopy verifies NewHTTPClient does not alias the
+// caller's Headers map: mutating the original after client creation must not
+// affect the client's default headers.
+func TestHTTPClient_HeadersDeepCopy(t *testing.T) {
+	var seenHeader string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenHeader = r.Header.Get("X-Test")
+		w.WriteHeader(200)
+	}))
+	defer srv.Close()
+
+	headers := map[string]string{"X-Test": "original"}
+	client := NewHTTPClient(HTTPClientConfig{BaseURL: srv.URL, Headers: headers})
+
+	// Mutate the original map after client creation
+	headers["X-Test"] = "mutated"
+
+	_, err := client.Get(context.Background(), "/api", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if seenHeader != "original" {
+		t.Fatalf("default header = %q, want %q (deep copy should isolate)", seenHeader, "original")
+	}
+}
+
+// TestHTTPClient_RateLimiterPerClientIsolation verifies that two clients with
+// different rate limit configs do not share a limiter: a low-rate client being
+// throttled must not block a high-rate client.
+func TestHTTPClient_RateLimiterPerClientIsolation(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+	}))
+	defer srv.Close()
+
+	// Client A: very low rate (1 QPS, burst 1)
+	lowConfig := resil.NewRateLimitConfig().
+		WithRateLimit(1).
+		WithRateBurst(1)
+	clientLow := NewHTTPClient(HTTPClientConfig{
+		BaseURL:         srv.URL,
+		RateLimitConfig: lowConfig,
+	})
+
+	// Client B: high rate (1000 QPS, burst 100)
+	highConfig := resil.NewRateLimitConfig().
+		WithRateLimit(1000).
+		WithRateBurst(100)
+	clientHigh := NewHTTPClient(HTTPClientConfig{
+		BaseURL:         srv.URL,
+		RateLimitConfig: highConfig,
+	})
+
+	// Exhaust client A's burst
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if _, err := clientLow.Get(ctx, "/api", nil); err != nil {
+		t.Fatalf("clientLow first request failed: %v", err)
+	}
+
+	// Client B should still be able to serve requests immediately
+	start := time.Now()
+	if _, err := clientHigh.Get(ctx, "/api", nil); err != nil {
+		t.Fatalf("clientHigh request failed (should not be throttled by client A): %v", err)
+	}
+	elapsed := time.Since(start)
+	// If global limiter were shared, client B would wait ~1s for client A's token.
+	if elapsed > 500*time.Millisecond {
+		t.Fatalf("clientHigh took %v, expected near-instant (limiter not isolated)", elapsed)
+	}
+}
+
 func TestHTTPClient_HEAD(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodHead {
@@ -650,5 +722,39 @@ func TestHttpApi_Upload(t *testing.T) {
 	}
 	if resp.StatusCode != 200 {
 		t.Errorf("Expected 200, got %d", resp.StatusCode)
+	}
+}
+
+func TestHeaderFromStruct(t *testing.T) {
+	type AuthHeaders struct {
+		Authorization string `json:"Authorization"`
+		Accept        string `json:"Accept"`
+		XRequestID    string `json:"X-Request-ID"`
+	}
+
+	headers, err := HeaderFromStruct(AuthHeaders{
+		Authorization: "Bearer token123",
+		Accept:        "application/json",
+		XRequestID:    "abc-123",
+	})
+	if err != nil {
+		t.Fatalf("HeaderFromStruct failed: %v", err)
+	}
+
+	if headers["Authorization"] != "Bearer token123" {
+		t.Errorf("Expected 'Bearer token123', got '%s'", headers["Authorization"])
+	}
+	if headers["Accept"] != "application/json" {
+		t.Errorf("Expected 'application/json', got '%s'", headers["Accept"])
+	}
+	if headers["X-Request-ID"] != "abc-123" {
+		t.Errorf("Expected 'abc-123', got '%s'", headers["X-Request-ID"])
+	}
+}
+
+func TestHeaderFromStruct_NonStruct(t *testing.T) {
+	_, err := HeaderFromStruct("not a struct")
+	if err == nil {
+		t.Error("Expected error for non-struct string input")
 	}
 }
