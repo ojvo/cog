@@ -2,8 +2,8 @@ package main
 
 import (
 	"fmt"
-	"c.n/ojv/cog/cfg"
-	"c.n/ojv/cog/log"
+	"ojv/cog/cfg"
+	"ojv/cog/log"
 	"os"
 	"strings"
 	"time"

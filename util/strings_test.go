@@ -150,3 +150,77 @@ func TestTruncate_LongString(t *testing.T) {
 		t.Errorf("Truncate should end with suffix")
 	}
 }
+
+func TestStringSliceContains(t *testing.T) {
+	s := []string{"a", "b", "c"}
+	if !StringSliceContains(s, "b") {
+		t.Error("expected to contain b")
+	}
+	if StringSliceContains(s, "d") {
+		t.Error("expected not to contain d")
+	}
+}
+
+func TestStringSliceFind(t *testing.T) {
+	s := []string{"a", "b", "a", "c"}
+	idx := StringSliceFind(s, "a")
+	if len(idx) != 2 || idx[0] != 0 || idx[1] != 2 {
+		t.Errorf("Find(a) = %v, want [0 2]", idx)
+	}
+	if idx := StringSliceFind(s, "z"); idx != nil {
+		t.Errorf("Find(z) = %v, want nil", idx)
+	}
+}
+
+func TestStringSliceDiff(t *testing.T) {
+	a := []string{"a", "b", "c", "d", "e", "f"}
+	b := []string{"b", "d", "f", "g"}
+	diff := StringSliceDiff(a, b)
+	if StringSliceContains(diff, "b") || StringSliceContains(diff, "d") || StringSliceContains(diff, "f") {
+		t.Error("diff should not contain elements from b")
+	}
+	if !StringSliceContains(diff, "a") || !StringSliceContains(diff, "c") || !StringSliceContains(diff, "e") {
+		t.Error("diff should contain a, c, e")
+	}
+	if len(diff) != 3 {
+		t.Errorf("diff length = %d, want 3", len(diff))
+	}
+}
+
+func TestStringSliceUniq(t *testing.T) {
+	in := []string{"a", "b", "a", "c", "b", "d"}
+	out := StringSliceUniq(in)
+	if len(out) != 4 {
+		t.Errorf("len = %d, want 4", len(out))
+	}
+	expected := []string{"a", "b", "c", "d"}
+	for i, v := range expected {
+		if out[i] != v {
+			t.Errorf("out[%d] = %q, want %q", i, out[i], v)
+		}
+	}
+}
+
+func TestStringSliceUniq_Empty(t *testing.T) {
+	if out := StringSliceUniq(nil); out != nil {
+		t.Errorf("nil in = %v, want nil", out)
+	}
+}
+
+func TestStringSliceReverse(t *testing.T) {
+	in := []string{"a", "b", "c"}
+	out := StringSliceReverse(in)
+	want := []string{"c", "b", "a"}
+	if len(out) != len(want) {
+		t.Fatalf("len = %d, want %d", len(out), len(want))
+	}
+	for i := range want {
+		if out[i] != want[i] {
+			t.Errorf("out[%d] = %q, want %q", i, out[i], want[i])
+		}
+	}
+	// Original should not be mutated
+	if in[0] != "a" {
+		t.Error("original slice was mutated")
+	}
+}

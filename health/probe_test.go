@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestLivenessHandler(t *testing.T) {
@@ -72,6 +73,36 @@ func TestReadinessHandlerWithChecker(t *testing.T) {
 
 	if w.Code != http.StatusServiceUnavailable {
 		t.Errorf("expected status 503 when checker fails, got %d", w.Code)
+	}
+}
+
+func TestReadinessHandler_CheckerCanUpdateReadiness(t *testing.T) {
+	handler := NewReadinessHandler()
+	handler.AddChecker(NewFuncChecker("updates_state", func() bool {
+		handler.SetReady(false)
+		return true
+	}))
+
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/ready", nil))
+		done <- w
+	}()
+
+	select {
+	case w := <-done:
+		if w.Code != http.StatusOK {
+			t.Errorf("first probe = %d, want 200", w.Code)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("readiness probe deadlocked when checker updated handler state")
+	}
+
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/ready", nil))
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("second probe = %d, want 503 after checker changed readiness", w.Code)
 	}
 }
 

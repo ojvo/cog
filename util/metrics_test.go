@@ -83,3 +83,24 @@ func TestMetrics_GetAll_Reset(t *testing.T) {
 	m.Reset()
 	as.Equal(int64(0), m.GetCounter("foo"))
 }
+
+// TestMetrics_ResetConcurrentSafe verifies that concurrent Reset() and Inc/Get
+// do not panic or race. Before the fix, Reset() directly replaced the sync.Map
+// fields while concurrent readers were using them.
+func TestMetrics_ResetConcurrentSafe(t *testing.T) {
+	m := NewMetrics()
+	var wg sync.WaitGroup
+	for i := 0; i < 50; i++ {
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			m.Inc("concurrent")
+			_ = m.GetCounter("concurrent")
+		}()
+		go func() {
+			defer wg.Done()
+			m.Reset()
+		}()
+	}
+	wg.Wait()
+}

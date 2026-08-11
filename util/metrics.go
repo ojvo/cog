@@ -6,13 +6,20 @@ import (
 	"time"
 )
 
+// metricState holds the mutable metric maps. The entire struct is replaced
+// atomically on Reset so that concurrent readers always observe a consistent
+// snapshot — no field-level race between Reset and Inc/Get.
+type metricState struct {
+	counters   sync.Map // map[string]*int64
+	gauges     sync.Map // map[string]*int64
+	histograms sync.Map // map[string]*Histogram
+	timers     sync.Map // map[string]*Timer
+	startTime  time.Time
+}
+
 // Metrics 通用指标收集器
 type Metrics struct {
-	counters   sync.Map // 计数器 map[string]*int64
-	gauges     sync.Map // 仪表盘 map[string]*int64
-	histograms sync.Map // 直方图 map[string]*Histogram
-	timers     sync.Map // 计时器 map[string]*Timer
-	startTime  time.Time
+	state atomic.Pointer[metricState]
 }
 
 // Histogram 直方图数据结构
@@ -34,9 +41,9 @@ type Timer struct {
 
 // NewMetrics 创建新的指标收集器
 func NewMetrics() *Metrics {
-	return &Metrics{
-		startTime: time.Now(),
-	}
+	m := &Metrics{}
+	m.state.Store(&metricState{startTime: time.Now()})
+	return m
 }
 
 // Counter 相关方法
@@ -48,13 +55,15 @@ func (m *Metrics) Inc(name string) {
 
 // AddCounter 增加计数器特定值
 func (m *Metrics) AddCounter(name string, delta int64) {
-	val, _ := m.counters.LoadOrStore(name, new(int64))
+	s := m.state.Load()
+	val, _ := s.counters.LoadOrStore(name, new(int64))
 	atomic.AddInt64(val.(*int64), delta)
 }
 
 // GetCounter 获取计数器值
 func (m *Metrics) GetCounter(name string) int64 {
-	val, ok := m.counters.Load(name)
+	s := m.state.Load()
+	val, ok := s.counters.Load(name)
 	if !ok {
 		return 0
 	}
@@ -65,19 +74,22 @@ func (m *Metrics) GetCounter(name string) int64 {
 
 // SetGauge 设置仪表盘值
 func (m *Metrics) SetGauge(name string, value int64) {
-	val, _ := m.gauges.LoadOrStore(name, new(int64))
+	s := m.state.Load()
+	val, _ := s.gauges.LoadOrStore(name, new(int64))
 	atomic.StoreInt64(val.(*int64), value)
 }
 
 // AddGauge 增加仪表盘值
 func (m *Metrics) AddGauge(name string, delta int64) {
-	val, _ := m.gauges.LoadOrStore(name, new(int64))
+	s := m.state.Load()
+	val, _ := s.gauges.LoadOrStore(name, new(int64))
 	atomic.AddInt64(val.(*int64), delta)
 }
 
 // GetGauge 获取仪表盘值
 func (m *Metrics) GetGauge(name string) int64 {
-	val, ok := m.gauges.Load(name)
+	s := m.state.Load()
+	val, ok := s.gauges.Load(name)
 	if !ok {
 		return 0
 	}
@@ -88,14 +100,15 @@ func (m *Metrics) GetGauge(name string) int64 {
 
 // AddSample 添加样本到直方图
 func (m *Metrics) AddSample(name string, value int64) {
+	s := m.state.Load()
 	var h *Histogram
-	val, ok := m.histograms.Load(name)
+	val, ok := s.histograms.Load(name)
 	if !ok {
 		h = &Histogram{
 			min: value,
 			max: value,
 		}
-		val, _ = m.histograms.LoadOrStore(name, h)
+		val, _ = s.histograms.LoadOrStore(name, h)
 		h = val.(*Histogram)
 	} else {
 		h = val.(*Histogram)
@@ -116,7 +129,8 @@ func (m *Metrics) AddSample(name string, value int64) {
 
 // GetHistogram 获取直方图统计信息
 func (m *Metrics) GetHistogram(name string) map[string]int64 {
-	val, ok := m.histograms.Load(name)
+	s := m.state.Load()
+	val, ok := s.histograms.Load(name)
 	if !ok {
 		return map[string]int64{
 			"count": 0,
@@ -149,7 +163,8 @@ func (m *Metrics) GetHistogram(name string) map[string]int64 {
 
 // StartTimer 开始计时
 func (m *Metrics) StartTimer(name string) func() {
-	val, _ := m.timers.LoadOrStore(name, &Timer{})
+	s := m.state.Load()
+	val, _ := s.timers.LoadOrStore(name, &Timer{})
 	timer := val.(*Timer)
 
 	// 使用goroutine ID作为key
@@ -173,14 +188,15 @@ func (m *Metrics) StartTimer(name string) func() {
 
 // GetTimer 获取计时器统计信息
 func (m *Metrics) GetTimer(name string) map[string]interface{} {
-	val, ok := m.timers.Load(name)
+	s := m.state.Load()
+	val, ok := s.timers.Load(name)
 	if !ok {
 		return map[string]interface{}{
-			"count":        int64(0),
-			"total_ns":     int64(0),
-			"avg_ns":       int64(0),
-			"avg_ms":       float64(0),
-			"total_ms":     float64(0),
+			"count":         int64(0),
+			"total_ns":      int64(0),
+			"avg_ns":        int64(0),
+			"avg_ms":        float64(0),
+			"total_ms":      float64(0),
 			"calls_per_sec": float64(0),
 		}
 	}
@@ -194,18 +210,18 @@ func (m *Metrics) GetTimer(name string) map[string]interface{} {
 		avgNs = timer.totalNs / timer.count
 	}
 
-	uptime := time.Since(m.startTime).Seconds()
+	uptime := time.Since(s.startTime).Seconds()
 	callsPerSec := float64(0)
 	if uptime > 0 {
 		callsPerSec = float64(timer.count) / uptime
 	}
 
 	return map[string]interface{}{
-		"count":        timer.count,
-		"total_ns":     timer.totalNs,
-		"avg_ns":       avgNs,
-		"avg_ms":       float64(avgNs) / 1000000.0,
-		"total_ms":     float64(timer.totalNs) / 1000000.0,
+		"count":         timer.count,
+		"total_ns":      timer.totalNs,
+		"avg_ns":        avgNs,
+		"avg_ms":        float64(avgNs) / 1000000.0,
+		"total_ms":      float64(timer.totalNs) / 1000000.0,
 		"calls_per_sec": callsPerSec,
 	}
 }
@@ -214,8 +230,9 @@ func (m *Metrics) GetTimer(name string) map[string]interface{} {
 
 // GetAll 获取所有指标
 func (m *Metrics) GetAll() map[string]interface{} {
+	s := m.state.Load()
 	result := map[string]interface{}{
-		"uptime_seconds": time.Since(m.startTime).Seconds(),
+		"uptime_seconds": time.Since(s.startTime).Seconds(),
 		"counters":       map[string]int64{},
 		"gauges":         map[string]int64{},
 		"histograms":     map[string]map[string]int64{},
@@ -223,25 +240,25 @@ func (m *Metrics) GetAll() map[string]interface{} {
 	}
 
 	counters := result["counters"].(map[string]int64)
-	m.counters.Range(func(key, value interface{}) bool {
+	s.counters.Range(func(key, value interface{}) bool {
 		counters[key.(string)] = atomic.LoadInt64(value.(*int64))
 		return true
 	})
 
 	gauges := result["gauges"].(map[string]int64)
-	m.gauges.Range(func(key, value interface{}) bool {
+	s.gauges.Range(func(key, value interface{}) bool {
 		gauges[key.(string)] = atomic.LoadInt64(value.(*int64))
 		return true
 	})
 
 	histograms := result["histograms"].(map[string]map[string]int64)
-	m.histograms.Range(func(key, value interface{}) bool {
+	s.histograms.Range(func(key, value interface{}) bool {
 		histograms[key.(string)] = m.GetHistogram(key.(string))
 		return true
 	})
 
 	timers := result["timers"].(map[string]map[string]interface{})
-	m.timers.Range(func(key, value interface{}) bool {
+	s.timers.Range(func(key, value interface{}) bool {
 		timers[key.(string)] = m.GetTimer(key.(string))
 		return true
 	})
@@ -249,13 +266,9 @@ func (m *Metrics) GetAll() map[string]interface{} {
 	return result
 }
 
-// Reset 重置所有指标
+// Reset 重置所有指标。原子替换整个内部状态，与并发 Inc/Get 无 race。
 func (m *Metrics) Reset() {
-	m.counters = sync.Map{}
-	m.gauges = sync.Map{}
-	m.histograms = sync.Map{}
-	m.timers = sync.Map{}
-	m.startTime = time.Now()
+	m.state.Store(&metricState{startTime: time.Now()})
 }
 
 // 辅助函数

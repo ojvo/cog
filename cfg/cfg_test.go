@@ -566,3 +566,86 @@ func TestINI_BoolVariants(t *testing.T) {
 		t.Error("d should be false")
 	}
 }
+
+// --- Deep copy / no leak tests ---
+
+// TestAsMap_DeepCopy verifies that AsMap returns a deep copy: mutating the
+// returned map must not affect the internal copy-on-write tree.
+func TestAsMap_DeepCopy(t *testing.T) {
+	c, _ := Parse([]byte(`{"db":{"host":"pg","port":5432}}`), FormatJSON)
+	m := c.AsMap()
+	// Mutate the returned map.
+	m["db"].(map[string]any)["host"] = "HACKED"
+	delete(m, "db")
+	// Original config must be unaffected.
+	if v := c.StringOr("db.host", ""); v != "pg" {
+		t.Errorf("db.host = %q, want pg (AsMap leaked internal map)", v)
+	}
+}
+
+// TestRaw_DeepCopy verifies that Raw returns deep-copied map/slice values.
+func TestRaw_DeepCopy(t *testing.T) {
+	c, _ := Parse([]byte(`{"db":{"host":"pg"},"tags":["a","b"]}`), FormatJSON)
+
+	// Map value.
+	v, ok := c.Raw("db")
+	if !ok {
+		t.Fatal("Raw(db) not found")
+	}
+	v.(map[string]any)["host"] = "HACKED"
+	if v := c.StringOr("db.host", ""); v != "pg" {
+		t.Errorf("db.host = %q, want pg (Raw leaked internal map)", v)
+	}
+
+	// Slice value.
+	v, ok = c.Raw("tags")
+	if !ok {
+		t.Fatal("Raw(tags) not found")
+	}
+	v.([]any)[0] = "HACKED"
+	ss := c.StringsOr("tags", nil)
+	if ss[0] != "a" {
+		t.Errorf("tags[0] = %q, want a (Raw leaked internal slice)", ss[0])
+	}
+}
+
+// TestSection_DeepCopy verifies that Section returns an independent copy:
+// mutating the sub-Config must not affect the parent.
+func TestSection_DeepCopy(t *testing.T) {
+	c, _ := Parse([]byte(`{"db":{"host":"pg","port":5432}}`), FormatJSON)
+	sec, ok := c.Section("db")
+	if !ok {
+		t.Fatal("section not found")
+	}
+	sec.Set("host", "HACKED")
+	// Parent must be unaffected.
+	if v := c.StringOr("db.host", ""); v != "pg" {
+		t.Errorf("db.host = %q, want pg (Section leaked internal map)", v)
+	}
+}
+
+// TestSlice_DeepCopy verifies that Slice returns independent sub-Configs.
+func TestSlice_DeepCopy(t *testing.T) {
+	input := `
+items:
+  - name: alpha
+    v: 1
+  - name: beta
+    v: 2
+`
+	c, _ := Parse([]byte(input), FormatSfc)
+	subs, ok := c.Slice("items")
+	if !ok {
+		t.Fatal("slice not found")
+	}
+	subs[0].Set("name", "HACKED")
+	// Parent must be unaffected.
+	c.Each("items", func(i int, sub *Config) bool {
+		if i == 0 {
+			if v := sub.StringOr("name", ""); v != "alpha" {
+				t.Errorf("items[0].name = %q, want alpha (Slice leaked)", v)
+			}
+		}
+		return true
+	})
+}

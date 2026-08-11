@@ -289,3 +289,18 @@ func end(from int, in string, target rune) (string, int) {
 	}
 	return "", from + 1
 }
+
+// DaysInMonth returns the number of days in the given month of the given year.
+func DaysInMonth(year, month int) int {
+	return time.Date(year, time.Month(month+1), 0, 0, 0, 0, 0, time.UTC).Day()
+}
+
+// MonthDates returns all dates in "2006-01-02" format for the given year/month.
+func MonthDates(year, month int) []string {
+	n := DaysInMonth(year, month)
+	dates := make([]string, n)
+	for i := 1; i <= n; i++ {
+		dates[i-1] = fmt.Sprintf("%d-%02d-%02d", year, month, i)
+	}
+	return dates
+}

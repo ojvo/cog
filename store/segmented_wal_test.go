@@ -103,6 +103,26 @@ func TestSegmentedWAL_GetReturnsCopy(t *testing.T) {
 	}
 }
 
+func TestSegmentedWAL_SetCopiesInput(t *testing.T) {
+	dir := newTestWALDir(t)
+	w, err := NewSegmentedWAL(dir)
+	if err != nil {
+		t.Fatalf("NewSegmentedWAL failed: %v", err)
+	}
+	defer w.Close()
+
+	input := []byte("original")
+	if err := w.Set("k", input); err != nil {
+		t.Fatalf("Set failed: %v", err)
+	}
+	input[0] = 'X'
+
+	got, ok := w.Get("k")
+	if !ok || string(got) != "original" {
+		t.Errorf("Set retained caller-owned slice: got %q, %v; want original, true", got, ok)
+	}
+}
+
 func TestSegmentedWAL_Recover(t *testing.T) {
 	dir := newTestWALDir(t)
 

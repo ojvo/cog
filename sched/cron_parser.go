@@ -2,6 +2,7 @@ package sched
 
 import (
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"sync"
@@ -460,41 +461,50 @@ func getRange(expr string, r bounds) (uint64, error) {
 	} else {
 		start, err = parseIntOrName(lowAndHigh[0], r.names)
 		if err != nil {
-			return 0, fmt.Errorf("解析'%s'失败: %s", expr, err)
+			return 0, err
 		}
-		if singleDigit {
+		switch len(lowAndHigh) {
+		case 1:
 			end = start
-		} else {
+		case 2:
 			end, err = parseIntOrName(lowAndHigh[1], r.names)
 			if err != nil {
-				return 0, fmt.Errorf("解析'%s'失败: %s", expr, err)
+				return 0, err
 			}
+		default:
+			return 0, fmt.Errorf("Too many hyphens: %s", expr)
 		}
 	}
 
-	if start < r.min {
-		return 0, fmt.Errorf("'%s'中的'%d'小于最小值'%d'", expr, start, r.min)
-	}
-	if end > r.max {
-		return 0, fmt.Errorf("'%s'中的'%d'大于最大值'%d'", expr, end, r.max)
-	}
-	if start > end {
-		return 0, fmt.Errorf("'%s'中的'%d'大于'%d'", expr, start, end)
-	}
-
-	if len(rangeAndStep) == 2 {
+	switch len(rangeAndStep) {
+	case 1:
+		step = 1
+	case 2:
 		step, err = mustParseInt(rangeAndStep[1])
 		if err != nil {
 			return 0, err
 		}
-		if step == 0 {
-			return 0, fmt.Errorf("'%s'中的步长不能为0", expr)
+		// Special handling: "N/step" means "N-max/step".
+		if singleDigit {
+			end = r.max
 		}
-	} else {
-		step = 1
+	default:
+		return 0, fmt.Errorf("Too many slashes: %s", expr)
 	}
 
-	// 修复：确保正确设置步长位
+	if start < r.min {
+		return 0, fmt.Errorf("Beginning of range (%d) below minimum (%d): %s", start, r.min, expr)
+	}
+	if end > r.max {
+		return 0, fmt.Errorf("End of range (%d) above maximum (%d): %s", end, r.max, expr)
+	}
+	if start > end {
+		return 0, fmt.Errorf("Beginning of range (%d) beyond end of range (%d): %s", start, end, expr)
+	}
+	if step == 0 {
+		return 0, fmt.Errorf("Step of range should be a positive number: %s", expr)
+	}
+
 	return getBits(start, end, step) | extra, nil
 }
 
@@ -596,7 +606,12 @@ func mustParseInt(expr string) (uint, error) {
 func getBits(min, max, step uint) uint64 {
 	var bits uint64
 
-	// 修复：确保步长正确应用
+	// If step is 1, use shifts for performance.
+	if step == 1 {
+		return ^(math.MaxUint64 << (max + 1)) & (math.MaxUint64 << min)
+	}
+
+	// Else, use a simple loop.
 	for i := min; i <= max; i += step {
 		bits |= 1 << i
 	}

@@ -3,16 +3,16 @@ package sched
 import (
 	"fmt"
 	"strconv"
-	"time"
 	"strings"
+	"time"
 )
 
 const (
-	baseTimeFmt   = "2006-01-02 15:04:05"
-	baseTimeMsFmt = "2006-01-02 15:04:05.000"
-	baseTimeTzFmt = "2006-01-02T15:04:05Z"
-	ymdTimeFmt    = "2006-01-02"
-	ymdSimpleTimeFmt    = "20060102"
+	baseTimeFmt      = "2006-01-02 15:04:05"
+	baseTimeMsFmt    = "2006-01-02 15:04:05.000"
+	baseTimeTzFmt    = "2006-01-02T15:04:05Z"
+	ymdTimeFmt       = "2006-01-02"
+	ymdSimpleTimeFmt = "20060102"
 )
 
 // 返回unix时间戳
@@ -56,12 +56,11 @@ func Ns2DateS(nsStr string) string {
 	return Ms2String(ts / 1000)
 }
 
-
 func Ms2YmdHms(ms int64) string {
 	return Ms2Time(ms).Format(baseTimeFmt)
 }
 
-//+8?
+// +8?
 func Ms2Ymd(ms int64) string {
 	return Ms2Time(ms).Format(ymdTimeFmt)
 }
@@ -87,7 +86,7 @@ func YmdTHmsZ2Ms(ts string) int64 {
 	return curTime.UnixNano() / 1e6
 }
 
-//yyyy-mm-ddThh:mm:ssZ
+// yyyy-mm-ddThh:mm:ssZ
 func Ms2YmdTHmsZ(ms int64) string {
 	return Ms2Time(ms).Format(baseTimeTzFmt)
 }
@@ -127,7 +126,7 @@ func YmdSub(t0, t1 int64) float32 {
 	return float32(t0Time.Sub(t1Time).Hours()) / (365 * 24)
 }
 
-//周几
+// 周几
 func Ms2WeekDay(ms int64) int {
 	t := Ms2Time(ms)
 	return int(t.Weekday())
@@ -211,7 +210,6 @@ func Ymd2Date(ts string) string {
 	return timeStr
 }
 
-
 // 预定义数字字符
 var digits = [10]byte{'0', '1', '2', '3', '4', '5', '6', '7', '8', '9'}
 
@@ -219,43 +217,40 @@ func formatTime2Builder(t time.Time, b *strings.Builder) {
 	year, month, day := t.Date()
 	hour, min, sec := t.Clock()
 	msec := t.Nanosecond() / 1000000
-	
+
 	// 年份（两位数）
 	y := year % 100
 	b.WriteByte(digits[y/10])
 	b.WriteByte(digits[y%10])
 	b.WriteByte('-')
-	
+
 	// 月份
 	b.WriteByte(digits[month/10])
 	b.WriteByte(digits[month%10])
 	b.WriteByte('-')
-	
+
 	// 日期
 	b.WriteByte(digits[day/10])
 	b.WriteByte(digits[day%10])
 	b.WriteByte(' ')
-	
+
 	// 小时
 	b.WriteByte(digits[hour/10])
 	b.WriteByte(digits[hour%10])
 	b.WriteByte(':')
-	
+
 	// 分钟
 	b.WriteByte(digits[min/10])
 	b.WriteByte(digits[min%10])
 	b.WriteByte(':')
-	
+
 	// 秒
 	b.WriteByte(digits[sec/10])
 	b.WriteByte(digits[sec%10])
 	b.WriteByte('.')
-	
+
 	// 毫秒
 	b.WriteByte(digits[msec/100])
 	b.WriteByte(digits[(msec/10)%10])
 	b.WriteByte(digits[msec%10])
 }
-
-
-

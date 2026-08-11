@@ -1,3 +1,3 @@
-module c.n/ojv/cog
+module ojv/cog
 
 go 1.22.6

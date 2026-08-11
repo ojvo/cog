@@ -127,8 +127,15 @@ func (c *Config) Has(key string) bool {
 	return ok
 }
 
-// Raw returns the untyped value at key.
-func (c *Config) Raw(key string) (any, bool) { return c.get(key) }
+// Raw returns the untyped value at key. Map and slice values are deep-copied
+// so callers cannot mutate the internal copy-on-write tree.
+func (c *Config) Raw(key string) (any, bool) {
+	v, ok := c.get(key)
+	if !ok {
+		return nil, false
+	}
+	return deepCopyVal(v), true
+}
 
 // String returns string value or error.
 func (c *Config) String(key string) (string, error) {
@@ -257,7 +264,8 @@ func (c *Config) GetDurationDefault(key string, def time.Duration) time.Duration
 
 // --- Structural getters ---
 
-// Section returns a sub-Config rooted at key (must be a map).
+// Section returns a sub-Config rooted at key (must be a map). The sub-Config
+// holds a deep copy so mutations do not propagate back to the parent.
 func (c *Config) Section(key string) (*Config, bool) {
 	v, ok := c.get(key)
 	if !ok {
@@ -268,14 +276,15 @@ func (c *Config) Section(key string) (*Config, bool) {
 		return nil, false
 	}
 	sub := New()
-	sub.data.Store(m)
+	sub.data.Store(deepCopy(m))
 	return sub, true
 }
 
 // GetSection preserves the legacy section API.
 func (c *Config) GetSection(key string) (*Config, bool) { return c.Section(key) }
 
-// Slice returns []*Config for a list-of-maps key.
+// Slice returns []*Config for a list-of-maps key. Each sub-Config holds a
+// deep copy so mutations do not propagate back to the parent.
 func (c *Config) Slice(key string) ([]*Config, bool) {
 	v, ok := c.get(key)
 	if !ok {
@@ -292,7 +301,7 @@ func (c *Config) Slice(key string) ([]*Config, bool) {
 			continue
 		}
 		sub := New()
-		sub.data.Store(m)
+		sub.data.Store(deepCopy(m))
 		result = append(result, sub)
 	}
 	return result, len(result) > 0
@@ -325,6 +334,7 @@ func (c *Config) GetMap(key string) map[string]string {
 }
 
 // Each iterates over a list-of-maps key, calling fn for each sub-Config.
+// Each sub-Config holds a deep copy so mutations do not propagate back.
 func (c *Config) Each(key string, fn func(int, *Config) bool) {
 	v, ok := c.get(key)
 	if !ok {
@@ -340,15 +350,16 @@ func (c *Config) Each(key string, fn func(int, *Config) bool) {
 			continue
 		}
 		sub := New()
-		sub.data.Store(m)
+		sub.data.Store(deepCopy(m))
 		if !fn(i, sub) {
 			break
 		}
 	}
 }
 
-// AsMap returns the full config tree as map[string]any.
-func (c *Config) AsMap() map[string]any { return c.root() }
+// AsMap returns the full config tree as map[string]any. The returned map is
+// a deep copy; callers may freely mutate it without affecting the Config.
+func (c *Config) AsMap() map[string]any { return deepCopy(c.root()) }
 
 // --- Write API ---
 

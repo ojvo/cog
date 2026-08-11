@@ -8,7 +8,7 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"c.n/ojv/cog/log"
+	"ojv/cog/log"
 )
 
 // ErrConnectionClosed is returned when a Call or Notify is attempted on a
@@ -65,6 +65,11 @@ func (c *Conn) readLoop() {
 		if err := c.decoder.Decode(&raw); err != nil {
 			if !c.closed.Load() {
 				log.Debugf("jsonrpc: readLoop exit: %v", err)
+				// Close the connection so pending Call goroutines are woken
+				// (they receive ErrConnectionClosed) and new Calls are
+				// rejected immediately. Without this, a peer-initiated EOF
+				// would leave pending Calls blocked forever on entry.ch.
+				c.Close()
 			}
 			return
 		}
@@ -85,6 +90,28 @@ func (c *Conn) readLoop() {
 		}
 
 		if hasID && method != "" {
+			// 防御:帧带 method 且 id 与我们 pending 的请求 id 相同 ——
+			// 说明这是对端把我们的请求原样回显(典型的"不是 JSON-RPC 服务器"
+			// 场景,如误配 cat/echo 为 MCP server),而不是对端发来的请求。
+			// 若不处理,pending 会空等直到外层超时(30s),故障极难诊断。
+			// 这里立即唤醒该 pending 并给出明确错误。
+			intID, ok := ParseIDInt(idRaw)
+			if ok {
+				c.pendingMu.Lock()
+				entry, hasPending := c.pending[intID]
+				if hasPending {
+					delete(c.pending, intID)
+					select {
+					case entry.ch <- &Response{JSONRPC: "2.0", ID: DecodeID(idRaw),
+						Error: &Error{Code: InvalidRequest, Message: "server echoed our request back; not a JSON-RPC server"}}:
+					default:
+					}
+					c.pendingMu.Unlock()
+					continue
+				}
+				c.pendingMu.Unlock()
+			}
+
 			req := &Request{JSONRPC: "2.0", ID: DecodeID(idRaw), Method: method}
 			if p, ok := raw["params"]; ok {
 				req.Params = p
@@ -232,12 +259,13 @@ func (c *Conn) Notify(method string, params any) error {
 	return c.encoder.Encode(&n)
 }
 
-func (c *Conn) Reply(id ID, result any, rpcErr *Error) error {
+// Reply sends a response to a server→client request.
+func (c *Conn) Reply(id any, result any) error {
 	if c.closed.Load() {
 		return ErrConnectionClosed
 	}
-	resp := Response{JSONRPC: "2.0", ID: id, Error: rpcErr}
-	if rpcErr == nil && result != nil {
+	resp := Response{JSONRPC: "2.0", ID: id}
+	if result != nil {
 		p, err := json.Marshal(result)
 		if err != nil {
 			return err
@@ -256,7 +284,10 @@ func (c *Conn) OnNotification(method string, fn func(json.RawMessage)) {
 }
 
 func (c *Conn) Notifications() <-chan *Notification { return c.notifyChan }
-func (c *Conn) Requests() <-chan *Request         { return c.requestChan }
+func (c *Conn) Requests() <-chan *Request           { return c.requestChan }
+
+// Done returns a channel that is closed when the connection is closed.
+func (c *Conn) Done() <-chan struct{} { return c.done }
 
 func (c *Conn) Close() error {
 	if !c.closed.CompareAndSwap(false, true) {
@@ -266,11 +297,47 @@ func (c *Conn) Close() error {
 	if c.stdin != nil {
 		_ = c.stdin.Close()
 	}
+	// Wake pending Call goroutines by sending nil (meaning "closed").
+	// We MUST NOT close(entry.ch): readLoop may still be holding a pointer
+	// to this entry and attempt `entry.ch <- resp` after we release
+	// pendingMu. Closing here would make that send panic. Using a
+	// non-blocking send on the buffered-1 channel is race-free: if
+	// readLoop already delivered a response, the send no-ops via default;
+	// otherwise the waiting Call observes nil and returns
+	// ErrConnectionClosed. The entry is then GC'd along with its channel.
 	c.pendingMu.Lock()
 	for id, entry := range c.pending {
 		delete(c.pending, id)
-		close(entry.ch)
+		select {
+		case entry.ch <- nil:
+		default:
+		}
 	}
 	c.pendingMu.Unlock()
 	return nil
+}
+
+// DecodeID decodes a json.RawMessage ID to any (preserving number/string/null).
+func DecodeID(raw json.RawMessage) any {
+	if string(raw) == "null" {
+		return nil
+	}
+	var i int64
+	if err := json.Unmarshal(raw, &i); err == nil {
+		return i
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		return s
+	}
+	return nil
+}
+
+// ParseIDInt decodes a json.RawMessage ID to int64 (numbers only).
+func ParseIDInt(raw json.RawMessage) (int64, bool) {
+	var i int64
+	if err := json.Unmarshal(raw, &i); err == nil {
+		return i, true
+	}
+	return 0, false
 }

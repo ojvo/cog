@@ -125,19 +125,24 @@ func (w *SegmentedWAL) Set(key string, value []byte) error {
 		return fmt.Errorf("WAL closed")
 	}
 
-	w.cache[key] = value
-	w.seq++
-
+	// Copy at the API boundary: the cache must not retain caller-owned memory.
+	// This keeps in-memory reads consistent with the bytes persisted to the WAL.
+	storedValue := append([]byte(nil), value...)
+	nextSeq := w.seq + 1
 	rec := logRecord{
-		Seq:   w.seq,
+		Seq:   nextSeq,
 		Type:  recordTypeSet,
 		Key:   key,
-		Value: value,
+		Value: storedValue,
 	}
 
+	// Persist before publishing the mutation to the in-memory index. A failed
+	// write must leave Get and a future recovery observing the same state.
 	if err := w.writeToActive(rec); err != nil {
 		return err
 	}
+	w.cache[key] = storedValue
+	w.seq = nextSeq
 
 	if w.active.size >= MaxSegmentSize {
 		return w.rotate()
@@ -174,18 +179,19 @@ func (w *SegmentedWAL) Delete(key string) error {
 		return nil
 	}
 
-	delete(w.cache, key)
-	w.seq++
-
+	nextSeq := w.seq + 1
 	rec := logRecord{
-		Seq:  w.seq,
+		Seq:  nextSeq,
 		Type: recordTypeDel,
 		Key:  key,
 	}
 
+	// As with Set, do not expose a deletion that did not reach the WAL.
 	if err := w.writeToActive(rec); err != nil {
 		return err
 	}
+	delete(w.cache, key)
+	w.seq = nextSeq
 
 	if w.active.size >= MaxSegmentSize {
 		return w.rotate()

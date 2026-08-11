@@ -1,7 +1,6 @@
 package util
 
 import (
-	"fmt"
 	"strconv"
 	"strings"
 )
@@ -59,7 +58,8 @@ func UnicodeToUTF8(s string) string {
 		if i+6 <= len(s) && s[i] == '\\' && s[i+1] == 'u' {
 			hexPart := s[i+2 : i+6]
 			if v, err := strconv.ParseInt(hexPart, 16, 32); err == nil {
-				b.WriteString(fmt.Sprintf("%c", rune(v)))
+				// WriteRune 比 fmt.Sprintf("%c", ...) 快 10x+ 且零分配
+				b.WriteRune(rune(v))
 				i += 6
 				continue
 			}

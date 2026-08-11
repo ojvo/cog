@@ -6,8 +6,8 @@ import (
 	"path/filepath"
 	"sync"
 
-	"c.n/ojv/cog/httputil"
-	"c.n/ojv/cog/log"
+	"ojv/cog/httputil"
+	"ojv/cog/log"
 )
 
 // Checker is the contract for a readiness probe.
@@ -61,14 +61,16 @@ func (h *ReadinessHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.mu.RLock()
-	defer h.mu.RUnlock()
+	ready := h.ready
+	checkers := append([]Checker(nil), h.checkers...)
+	h.mu.RUnlock()
 
-	if !h.ready {
+	if !ready {
 		httputil.Error(w, http.StatusServiceUnavailable, "service not ready")
 		return
 	}
 
-	for _, checker := range h.checkers {
+	for _, checker := range checkers {
 		if !checker.Check() {
 			log.Warnf("Health: readiness check failed: %s", checker.Name())
 			httputil.Error(w, http.StatusServiceUnavailable, checker.Name()+" not ready")

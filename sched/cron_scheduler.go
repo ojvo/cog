@@ -9,7 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"c.n/ojv/cog/log"
+	"ojv/cog/log"
 )
 
 const (
@@ -25,15 +25,6 @@ var (
 	ErrSchedulerStopped = errors.New("cron scheduler already stopped")
 )
 
-// null logger
-//var defaultLogger = func(level, s string) {}
-
-type loggerType func(level, s string)
-
-func SetLogger(logger loggerType) {
-	//defaultLogger = logger
-}
-
 // panic call
 var panicCaller = func(srv, err string) {
 }
@@ -44,10 +35,10 @@ func SetPanicCaller(p panicType) {
 	panicCaller = p
 }
 
-// NewCron - create CronSchduler
-func NewCron() *CronSchduler {
+// NewCron - create CronScheduler
+func NewCron() *CronScheduler {
 	ctx, cancel := context.WithCancel(context.Background())
-	return &CronSchduler{
+	return &CronScheduler{
 		tasks:  make(map[string]*JobModel),
 		ctx:    ctx,
 		cancel: cancel,
@@ -56,8 +47,8 @@ func NewCron() *CronSchduler {
 	}
 }
 
-// CronSchduler
-type CronSchduler struct {
+// CronScheduler
+type CronScheduler struct {
 	tasks  map[string]*JobModel
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -65,27 +56,23 @@ type CronSchduler struct {
 	wg      *sync.WaitGroup
 	once    *sync.Once
 	stopped atomic.Bool
+	started atomic.Bool
 
 	sync.RWMutex
 }
 
 // Register - only register srv's job model, don't start auto.
-func (c *CronSchduler) Register(srv string, model *JobModel) error {
+func (c *CronScheduler) Register(srv string, model *JobModel) error {
 	return c.reset(srv, model, true, false)
 }
 
 // UpdateJobModel - stop old job, update srv's job model
-func (c *CronSchduler) UpdateJobModel(srv string, model *JobModel) error {
-	return c.reset(srv, model, false, true)
-}
-
-// DynamicRegister - after cronlib already run, dynamic add a job, the job autostart by cronlib.
-func (c *CronSchduler) DynamicRegister(srv string, model *JobModel) error {
+func (c *CronScheduler) UpdateJobModel(srv string, model *JobModel) error {
 	return c.reset(srv, model, false, true)
 }
 
 // reset - reset srv model
-func (c *CronSchduler) reset(srv string, model *JobModel, denyReplace, autoStart bool) error {
+func (c *CronScheduler) reset(srv string, model *JobModel, denyReplace, autoStart bool) error {
 	if c.stopped.Load() {
 		return ErrSchedulerStopped
 	}
@@ -96,6 +83,12 @@ func (c *CronSchduler) reset(srv string, model *JobModel, denyReplace, autoStart
 	// double-check under lock to avoid race with Stop()
 	if c.stopped.Load() {
 		return ErrSchedulerStopped
+	}
+
+	// If scheduler has already started, auto-start new/updated jobs
+	// so Register works correctly after Start.
+	if c.started.Load() {
+		autoStart = true
 	}
 
 	// validate model
@@ -128,7 +121,7 @@ func (c *CronSchduler) reset(srv string, model *JobModel, denyReplace, autoStart
 }
 
 // UnRegister - stop and delete srv
-func (c *CronSchduler) UnRegister(srv string) error {
+func (c *CronScheduler) UnRegister(srv string) error {
 	c.Lock()
 	defer c.Unlock()
 
@@ -144,7 +137,7 @@ func (c *CronSchduler) UnRegister(srv string) error {
 
 // Stop - stop all cron job. After Stop, the scheduler is terminal:
 // any subsequent Register/DynamicRegister/UpdateJobModel returns ErrSchedulerStopped.
-func (c *CronSchduler) Stop() {
+func (c *CronScheduler) Stop() {
 	c.Lock()
 	defer c.Unlock()
 
@@ -158,7 +151,7 @@ func (c *CronSchduler) Stop() {
 }
 
 // StopService - stop job by serviceName
-func (c *CronSchduler) StopService(srv string) {
+func (c *CronScheduler) StopService(srv string) {
 	c.Lock()
 	defer c.Unlock()
 
@@ -173,7 +166,7 @@ func (c *CronSchduler) StopService(srv string) {
 
 // StopServicePrefix - stop job by srv regex prefix.
 // if regex = "risk.scan", stop risk.scan.total, risk.scan.user at the same time
-func (c *CronSchduler) StopServicePrefix(regex string) {
+func (c *CronScheduler) StopServicePrefix(regex string) {
 	c.Lock()
 	defer c.Unlock()
 
@@ -248,33 +241,33 @@ func getNextDueSafe(spec string, last time.Time) (time.Time, error) {
 	return due, err
 }
 
-func (c *CronSchduler) Start() {
+func (c *CronScheduler) Start() {
 	// only once call
 	c.once.Do(func() {
-		c.RLock()
-		defer c.RUnlock()
+		c.Lock()
+		defer c.Unlock()
 
+		c.started.Store(true)
 		for _, job := range c.tasks {
 			c.wg.Add(1)
 			job.runLoop(c.wg)
 		}
-
 	})
 }
 
 // Wait - if all jobs is exited, return.
-func (c *CronSchduler) Wait() {
+func (c *CronScheduler) Wait() {
 	c.wg.Wait()
 }
 
 // WaitStop - when stop cronlib controller, return.
-func (c *CronSchduler) WaitStop() {
+func (c *CronScheduler) WaitStop() {
 	select {
 	case <-c.ctx.Done():
 	}
 }
 
-func (c *CronSchduler) GetServiceCron(srv string) (*JobModel, error) {
+func (c *CronScheduler) GetServiceCron(srv string) (*JobModel, error) {
 	c.RLock()
 	defer c.RUnlock()
 
@@ -289,10 +282,9 @@ func (c *CronSchduler) GetServiceCron(srv string) (*JobModel, error) {
 // NewJobModel - defualt block sync callfunc
 func NewJobModel(spec string, f func(), options ...JobOption) (*JobModel, error) {
 	job := &JobModel{
-		async:      false,
-		do:         f,
-		spec:       spec,
-		notifyChan: make(chan int, 1),
+		async: false,
+		do:    f,
+		spec:  spec,
 	}
 	job.running.Store(true)
 
@@ -354,9 +346,8 @@ type JobModel struct {
 	spec string
 
 	// for control
-	ctx        context.Context
-	cancel     context.CancelFunc
-	notifyChan chan int
+	ctx    context.Context
+	cancel context.CancelFunc
 
 	// break for { ... } loop
 	running atomic.Bool
@@ -465,9 +456,9 @@ func (j *JobModel) run(wg *sync.WaitGroup) {
 				}()
 			} else {
 				// 同步模式：等待完成或超时
+				ctx, cancel := context.WithTimeout(j.ctx, defaultTimeout)
 				done := make(chan struct{})
 				go func() {
-					defer j.taskRunning.Store(false)
 					defer close(done)
 					if j.tryCatch {
 						tryCatch(j)
@@ -476,13 +467,14 @@ func (j *JobModel) run(wg *sync.WaitGroup) {
 					}
 				}()
 
-				// 等待任务完成或超时
 				select {
 				case <-done:
 					// 任务正常完成
-				case <-time.After(defaultTimeout):
-					logWarn("任务执行超时: %s", j.srv)
+				case <-ctx.Done():
+					logWarn("任务执行超时或被取消: %s", j.srv)
 				}
+				cancel()
+				j.taskRunning.Store(false)
 
 				// 计算执行耗时
 				costMs := time.Since(startTime).Milliseconds()
@@ -493,9 +485,6 @@ func (j *JobModel) run(wg *sync.WaitGroup) {
 
 				logInfo("任务执行完成: %s, 耗时: %dms", j.srv, costMs)
 			}
-		case <-j.notifyChan:
-			// 收到通知，立即执行
-			continue
 		}
 	}
 
@@ -504,15 +493,6 @@ func (j *JobModel) run(wg *sync.WaitGroup) {
 
 func (j *JobModel) workerExited() bool {
 	return j.exited.Load()
-}
-
-func (j *JobModel) notifySig() {
-	select {
-	case j.notifyChan <- 1:
-	default:
-		// avoid block
-		return
-	}
 }
 
 func tryCatch(job *JobModel) {
@@ -531,7 +511,7 @@ func tryCatch(job *JobModel) {
 }
 
 // HealthCheck - 检查所有任务的健康状态
-func (c *CronSchduler) HealthCheck() map[string]map[string]interface{} {
+func (c *CronScheduler) HealthCheck() map[string]map[string]interface{} {
 	c.RLock()
 	defer c.RUnlock()
 

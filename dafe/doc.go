@@ -1,10 +1,23 @@
-// Package dafe provides generic CSV struct mapping utilities:
+// Package dafe (data-format engine) provides structured file I/O for common
+// persistence formats, organized by format family into sub-packages:
 //
-//   - Reader[T] / Iterator[T]: stream CSV rows into typed structs via reflection
-//   - Writer[T]:               write typed structs to CSV rows
-//   - CSV / Open:              lightweight file-level helpers
+//   - dafe/csv    CSV reader/writer with three abstraction layers:
+//     file-level Open/CSV/Writer[T], generic typed Reader[T] (struct tags,
+//     CsvMarshal/CustomSetter interfaces, snake_case fallback, WithCheck),
+//     and concurrent CSVWriter/CSVReader with atomic UpdateRow. Also
+//     provides pipe-separated Record/Records map helpers and Unmarshal
+//     (Record → struct with datefmt tag).
+//   - dafe/json   JSON and JSON Lines: LoadJSONFile/SaveJSONFile,
+//     ForEachLine (SIMD-accelerated streaming), JSONLWriter/JSONLReader,
+//     ExtractJSON/ExtractJSONArray (LLM response extraction with markdown
+//     fence and balanced-brace scanning)
 //
-// The generic reader/writer use reflection to map CSV columns to struct fields
-// by name (case-insensitive). Supported field types: string, int/int8/.../int64,
-// float32/float64, time.Time, and any type parseable via fmt.Sscan.
+// The root package provides format-agnostic conversion:
+//
+//   - ConvertInto   tag-aware struct/map/slice conversion (defaults to "json" tag)
+//   - AsAnyMap / AsStringMap   value-to-map projection
+//   - ConvertOption   tag-selection control
+//
+// Choose by need: dafe/csv for CSV; dafe/json for JSON/JSONL;
+// ConvertInto/AsAnyMap for cross-format projection.
 package dafe

@@ -31,7 +31,7 @@ func GetCallerInfo(skip int) CallerInfo {
 	fn := runtime.FuncForPC(pc)
 	funcName := "unknown"
 	pkgName := "unknown"
-	
+
 	if fn != nil {
 		funcName = fn.Name()
 		// 分离包名和函数名
@@ -60,4 +60,44 @@ func GetCallerInfo(skip int) CallerInfo {
 func GetCallerInfoString(skip int) string {
 	info := GetCallerInfo(skip + 1)
 	return fmt.Sprintf("%s:%d[%s]", info.File, info.Line, info.Function)
+}
+
+// GetCallerStack returns up to maxDepth frames of the call stack starting at
+// the caller of GetCallerStack plus skip. The returned slice is ordered from
+// the innermost frame (index 0) outward. A non-positive maxDepth returns nil.
+//
+// Unlike runtime/debug.Stack, this returns structured CallerInfo suitable for
+// concise logging or error enrichment without the verbose full-stack output.
+func GetCallerStack(skip, maxDepth int) []CallerInfo {
+	if maxDepth <= 0 {
+		return nil
+	}
+	frames := make([]CallerInfo, 0, maxDepth)
+	for i := 0; i < maxDepth; i++ {
+		pc, file, line, ok := runtime.Caller(skip + 1 + i)
+		if !ok {
+			break
+		}
+		funcName := "unknown"
+		pkgName := "unknown"
+		if fn := runtime.FuncForPC(pc); fn != nil {
+			funcName = fn.Name()
+			if lastDot := strings.LastIndex(funcName, "."); lastDot >= 0 {
+				pkgName = funcName[:lastDot]
+				funcName = funcName[lastDot+1:]
+			}
+		}
+		if lastSlash := strings.LastIndex(file, "/"); lastSlash >= 0 {
+			file = file[lastSlash+1:]
+		} else if lastSlash = strings.LastIndex(file, "\\"); lastSlash >= 0 {
+			file = file[lastSlash+1:]
+		}
+		frames = append(frames, CallerInfo{
+			File:     file,
+			Line:     line,
+			Function: funcName,
+			Package:  pkgName,
+		})
+	}
+	return frames
 }

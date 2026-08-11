@@ -9,7 +9,7 @@ import (
 	"os"
 	"time"
 
-	"c.n/ojv/cog/resil"
+	"ojv/cog/cam/resil"
 )
 
 // RequestOptions configures a function-style HTTP request.

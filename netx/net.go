@@ -7,7 +7,7 @@ import (
 	"net/url"
 	"strings"
 
-	"c.n/ojv/cog/log"
+	"ojv/cog/log"
 )
 
 // GetIntranetIP returns the first non-loopback IPv4 address of the machine.

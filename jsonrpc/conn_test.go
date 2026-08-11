@@ -58,6 +58,36 @@ func TestConn_Call_Success(t *testing.T) {
 	}
 }
 
+func TestConn_Call_EchoedRequestDetected(t *testing.T) {
+	// 模拟 cat/echo 类误配:对端把我们的请求原样回显(带 method+id)。
+	// 客户端应立即识别为"非 JSON-RPC 服务器",而不是空等超时。
+	conn, serverWrite, serverRead := newPipeConn(t)
+	defer conn.Close()
+	defer serverWrite.Close()
+
+	go func() {
+		defer serverRead.Close()
+		dec := json.NewDecoder(serverRead)
+		var req map[string]json.RawMessage
+		if err := dec.Decode(&req); err != nil {
+			return
+		}
+		// 原样回显(包括 method 字段)。
+		data, _ := json.Marshal(req)
+		serverWrite.Write(data)
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	err := conn.Call(ctx, "initialize", map[string]any{}, nil)
+	if err == nil {
+		t.Fatal("echoed request should be reported as error, got nil")
+	}
+	if !strings.Contains(err.Error(), "echoed") {
+		t.Errorf("error should mention echoed request, got: %v", err)
+	}
+}
+
 func TestConn_Call_ErrorPreservesCode(t *testing.T) {
 	conn, serverWrite, serverRead := newPipeConn(t)
 	defer conn.Close()
@@ -369,6 +399,55 @@ func TestConn_Close_ClosesDoneChannel(t *testing.T) {
 	}
 }
 
+// TestConn_Close_NoPanicOnConcurrentResponse verifies that closing the Conn
+// while readLoop is about to deliver a response does not panic.
+//
+// Before the fix, Close closed entry.ch; readLoop's subsequent
+// `entry.ch <- resp` would panic on send-to-closed-channel. Now Close sends
+// nil to the buffered channel instead, which is race-free.
+func TestConn_Close_NoPanicOnConcurrentResponse(t *testing.T) {
+	for i := 0; i < 50; i++ {
+		conn, serverWrite, serverRead := newPipeConn(t)
+
+		// Reader that emits a response immediately (races with Close).
+		go func() {
+			defer serverRead.Close()
+			defer serverWrite.Close()
+			dec := json.NewDecoder(serverRead)
+			var req map[string]json.RawMessage
+			if err := dec.Decode(&req); err != nil {
+				return
+			}
+			var id int64
+			_ = json.Unmarshal(req["id"], &id)
+			resp := map[string]any{
+				"jsonrpc": "2.0",
+				"id":      id,
+				"result":  "ok",
+			}
+			data, _ := json.Marshal(resp)
+			serverWrite.Write(data)
+		}()
+
+		// Call races with Close: whichever wins, neither path may panic.
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			defer conn.Close()
+			// Small jitter to vary the race window across iterations.
+			time.Sleep(time.Duration(i%5) * time.Microsecond)
+		}()
+		go func() {
+			defer wg.Done()
+			ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+			defer cancel()
+			_ = conn.Call(ctx, "ping", nil, nil)
+		}()
+		wg.Wait()
+	}
+}
+
 func TestDecodeID(t *testing.T) {
 	tests := []struct {
 		input string
@@ -424,5 +503,57 @@ func TestNewStringConn(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("notification not delivered")
+	}
+}
+
+// TestConn_ReadLoopEOFWakesPendingCall verifies that when the peer closes
+// their write end (causing readLoop's decoder.Decode to return EOF), the
+// connection is closed and pending Calls are woken with ErrConnectionClosed.
+//
+// Before the fix, readLoop returned on EOF without calling Close(), leaving
+// pending Calls blocked forever on entry.ch.
+func TestConn_ReadLoopEOFWakesPendingCall(t *testing.T) {
+	conn, serverWrite, serverRead := newPipeConn(t)
+	defer conn.Close()
+
+	// Drain server-side reads so the client can send its request.
+	go func() {
+		defer serverRead.Close()
+		buf := make([]byte, 1024)
+		for {
+			if _, err := serverRead.Read(buf); err != nil {
+				return
+			}
+		}
+	}()
+
+	// Start a Call with a long timeout — it should NOT wait for the full
+	// timeout; the EOF should wake it quickly.
+	callDone := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		callDone <- conn.Call(ctx, "test/slow", nil, nil)
+	}()
+
+	// Give the Call time to register in pending.
+	time.Sleep(50 * time.Millisecond)
+
+	// Close the server's write end → client's readLoop sees EOF.
+	serverWrite.Close()
+
+	select {
+	case err := <-callDone:
+		if !errors.Is(err, ErrConnectionClosed) {
+			t.Errorf("Call after EOF = %v, want ErrConnectionClosed", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Call did not return after EOF — pending was not woken")
+	}
+
+	// New Calls after EOF should also return ErrConnectionClosed.
+	err := conn.Call(context.Background(), "test/afterEOF", nil, nil)
+	if !errors.Is(err, ErrConnectionClosed) {
+		t.Errorf("Call after EOF-driven Close = %v, want ErrConnectionClosed", err)
 	}
 }

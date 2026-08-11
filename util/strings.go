@@ -68,3 +68,62 @@ func safeSuffix(s string, maxBytes int) string {
 	}
 	return s[start:]
 }
+
+// StringSliceContains reports whether s contains e.
+func StringSliceContains(s []string, e string) bool {
+	for _, v := range s {
+		if v == e {
+			return true
+		}
+	}
+	return false
+}
+
+// StringSliceFind returns all indices in ss where the value equals s.
+// Returns nil if not found.
+func StringSliceFind(ss []string, s string) []int {
+	var indices []int
+	for i, v := range ss {
+		if v == s {
+			indices = append(indices, i)
+		}
+	}
+	return indices
+}
+
+// StringSliceDiff returns elements in a that are not in b.
+func StringSliceDiff(a, b []string) []string {
+	var diff []string
+	for _, e := range a {
+		if !StringSliceContains(b, e) {
+			diff = append(diff, e)
+		}
+	}
+	return diff
+}
+
+// StringSliceUniq returns a deduplicated copy of ss, preserving the first
+// occurrence order. Returns nil if ss is nil.
+func StringSliceUniq(ss []string) []string {
+	if ss == nil {
+		return nil
+	}
+	out := make([]string, 0, len(ss))
+	seen := make(map[string]struct{}, len(ss))
+	for _, s := range ss {
+		if _, ok := seen[s]; !ok {
+			seen[s] = struct{}{}
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// StringSliceReverse returns a new slice with elements in reverse order.
+func StringSliceReverse(ss []string) []string {
+	rev := make([]string, len(ss))
+	for i, j := 0, len(ss)-1; i < len(ss); i, j = i+1, j-1 {
+		rev[j] = ss[i]
+	}
+	return rev
+}

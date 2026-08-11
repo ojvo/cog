@@ -3,9 +3,9 @@ package obs
 import (
 	"time"
 
-	"c.n/ojv/cog/event"
-	"c.n/ojv/cog/netx"
-	"c.n/ojv/cog/store"
+	"ojv/cog/cam/event"
+	"ojv/cog/netx"
+	"ojv/cog/store"
 )
 
 // ObservabilitySnapshot aggregates runtime stats from multiple components.

@@ -188,7 +188,7 @@ log.DefaultLogger().WithFields(log.Fields{
 
 ### 元结构原语
 ```go
-import "ojv/cog/pipeline"
+import "ojv/cog/cam/pipeline"
 
 // 装饰器链
 handler := pipeline.Chain(func(s string) error {

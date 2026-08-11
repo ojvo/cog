@@ -41,7 +41,7 @@ func TestCronScheduler_Basic(t *testing.T) {
 	}
 }
 
-func TestCronScheduler_DynamicRegister(t *testing.T) {
+func TestCronScheduler_DynamicAdd(t *testing.T) {
 	cron := NewCron()
 	cron.Start()
 	defer cron.Stop()
@@ -51,9 +51,9 @@ func TestCronScheduler_DynamicRegister(t *testing.T) {
 		close(done)
 	})
 
-	err := cron.DynamicRegister("dynamic_job", job)
+	err := cron.UpdateJobModel("dynamic_job", job)
 	if err != nil {
-		t.Fatalf("Failed to dynamic register: %v", err)
+		t.Fatalf("Failed to dynamic add: %v", err)
 	}
 
 	select {
@@ -211,8 +211,8 @@ func TestCronScheduler_StopServicePrefix(t *testing.T) {
 }
 
 // TestCronScheduler_RegisterAfterStop verifies that after Stop the scheduler
-// is terminal: Register/DynamicRegister/UpdateJobModel all return
-// ErrSchedulerStopped instead of silently registering jobs that can never run.
+// is terminal: Register/UpdateJobModel both return ErrSchedulerStopped
+// instead of silently registering jobs that can never run.
 func TestCronScheduler_RegisterAfterStop(t *testing.T) {
 	cron := NewCron()
 	cron.Start()
@@ -223,11 +223,32 @@ func TestCronScheduler_RegisterAfterStop(t *testing.T) {
 	if err := cron.Register("after_stop", job); err != ErrSchedulerStopped {
 		t.Errorf("Register after Stop = %v, want ErrSchedulerStopped", err)
 	}
-	if err := cron.DynamicRegister("after_stop_dyn", job); err != ErrSchedulerStopped {
-		t.Errorf("DynamicRegister after Stop = %v, want ErrSchedulerStopped", err)
-	}
 	if err := cron.UpdateJobModel("after_stop", job); err != ErrSchedulerStopped {
 		t.Errorf("UpdateJobModel after Stop = %v, want ErrSchedulerStopped", err)
+	}
+}
+
+// TestCronScheduler_RegisterAfterStart verifies that Register called after
+// Start auto-starts the job (timing fix).
+func TestCronScheduler_RegisterAfterStart(t *testing.T) {
+	cron := NewCron()
+	cron.Start()
+	defer cron.Stop()
+
+	done := make(chan struct{})
+	job, _ := NewJobModel("* * * * * *", func() {
+		close(done)
+	})
+
+	if err := cron.Register("reg_after_start", job); err != nil {
+		t.Fatalf("Register after Start: %v", err)
+	}
+
+	select {
+	case <-done:
+		// Success - job auto-started despite Register's autoStart=false
+	case <-time.After(2 * time.Second):
+		t.Error("Register after Start did not auto-start the job")
 	}
 }
 

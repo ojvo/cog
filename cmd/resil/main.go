@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"c.n/ojv/cog/resil"
+	"ojv/cog/cam/resil"
 )
 
 // This demo shows Retry + Backoff + HTTPRetry combination:

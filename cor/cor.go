@@ -1,14 +1,17 @@
 package cor
 
 import (
+	"context"
 	"fmt"
-	"c.n/ojv/cog/cfg"
-	"c.n/ojv/cog/log"
+	"ojv/cog/cfg"
+	"ojv/cog/log"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 )
 
 var (
@@ -16,10 +19,18 @@ var (
 )
 
 // Kernel represents the Cog application kernel.
+// It manages component lifecycle and provides signal-based graceful shutdown.
 type Kernel struct {
 	mu           sync.RWMutex
 	globalConfig atomic.Pointer[cfg.Config]
 	components   []Component
+
+	baseCtx       context.Context
+	baseCtxCancel context.CancelFunc
+	interrupt     chan os.Signal
+	initOnce      sync.Once // guards one-time initialization of baseCtx + interrupt
+	onceExit      sync.Once
+	exited        atomic.Bool
 }
 
 // Component defines the interface for Cog components.
@@ -206,6 +217,89 @@ func Fatalf(format string, args ...any) { log.Fatalf(format, args...) }
 // SetLogLevel sets the default logger's level.
 func SetLogLevel(level log.Level) {
 	log.SetLevel(level)
+}
+
+// ---------------------------------------------------------------------------
+// Lifecycle: signal-based graceful shutdown
+// ---------------------------------------------------------------------------
+
+// ensureBaseContext initializes the base context and interrupt channel exactly
+// once. Safe for concurrent use; subsequent calls are no-ops. The initOnce
+// guard prevents a race where parallel Run/Exit/BaseContext callers would
+// otherwise each create their own baseCtx/interrupt, leaking the first set
+// and replacing signal.Notify registrations.
+func (k *Kernel) ensureBaseContext() {
+	k.initOnce.Do(func() {
+		k.baseCtx, k.baseCtxCancel = context.WithCancel(context.Background())
+		k.interrupt = make(chan os.Signal, 1)
+	})
+}
+
+// Run blocks until an OS signal (SIGINT, SIGTERM) or Exit() is called,
+// then performs graceful shutdown of all components.
+// Must be called after Init.
+func Run() { defaultKernel.Run() }
+
+// Run blocks until an OS signal (SIGINT, SIGTERM) or Exit() is called,
+// then performs graceful shutdown of all components.
+func (k *Kernel) Run() {
+	if k.exited.Load() {
+		return
+	}
+	k.ensureBaseContext()
+	// Exit() may have raced between the exited.Load() check above and
+	// ensureBaseContext(); re-check to avoid blocking on an already-cancelled
+	// context or registering signal.Notify after Exit cleaned up.
+	if k.exited.Load() {
+		return
+	}
+
+	signal.Notify(k.interrupt, os.Interrupt, syscall.SIGINT, syscall.SIGTERM)
+
+	select {
+	case <-k.interrupt:
+	case <-k.baseCtx.Done():
+	}
+
+	k.onceExit.Do(func() {
+		k.exited.Store(true)
+		// Cancel base context first so any goroutines watching BaseContext can clean up
+		k.baseCtxCancel()
+		signal.Stop(k.interrupt)
+		_ = k.Close()
+	})
+}
+
+// Exit triggers graceful shutdown programmatically.
+// Safe to call multiple times; only the first call takes effect.
+func Exit() { defaultKernel.Exit() }
+
+// Exit triggers graceful shutdown. Safe to call from any goroutine.
+func (k *Kernel) Exit() {
+	if k.exited.Load() {
+		return
+	}
+	// Ensure baseCtxCancel/interrupt are initialized even if Exit is called
+	// before Run/BaseContext. This allows the onceExit.Do block below to
+	// safely call baseCtxCancel() and signal.Stop() without nil checks.
+	k.ensureBaseContext()
+	k.onceExit.Do(func() {
+		k.exited.Store(true)
+		k.baseCtxCancel()
+		signal.Stop(k.interrupt)
+		_ = k.Close()
+	})
+}
+
+// BaseContext returns a context that is cancelled before components are
+// closed during shutdown. Long-running goroutines should watch this context
+// to clean up before the full shutdown sequence.
+func BaseContext() context.Context { return defaultKernel.BaseContext() }
+
+// BaseContext returns the shutdown context.
+func (k *Kernel) BaseContext() context.Context {
+	k.ensureBaseContext()
+	return k.baseCtx
 }
 
 // Close closes the default kernel.

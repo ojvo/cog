@@ -60,12 +60,18 @@ const (
 // NewLRUCache creates a sharded LRU cache.
 //
 //   - bucketCnt: number of shards (rounded up to the next power of two).
-//     More shards reduce lock contention but use more memory.
+//     More shards reduce lock contention but use more memory. 0 uses one shard.
 //   - capPerBkt: capacity of each shard. Total capacity is bucketCnt * capPerBkt.
+//     0 uses capacity one.
 //   - expiration: optional item lifetime. 0 (or omitted) means no expiration.
 //     Expiration is lazy: expired items are skipped on read and evicted by
 //     LRU pressure rather than by a background goroutine.
+//
+// Zero-valued sizing arguments are normalized to one so configuration-derived
+// values cannot make construction panic or create a cache that fails on Put.
 func NewLRUCache(bucketCnt, capPerBkt uint16, expiration ...time.Duration) *LRUCache {
+	bucketCnt = max(bucketCnt, 1)
+	capPerBkt = max(capPerBkt, 1)
 	mask := maskOfNextPowOf2(bucketCnt)
 	c := &LRUCache{
 		locks:  make([]sync.Mutex, mask+1),
@@ -87,8 +93,10 @@ func NewLRUCache(bucketCnt, capPerBkt uint16, expiration ...time.Duration) *LRUC
 // being evicted by one-shot reads.
 //
 // capPerBkt is the capacity of each level-1 shard, adding capPerBkt * bucketCnt
-// extra slots. Must be called before the cache is used.
+// extra slots. A value of 0 uses capacity one. Must be called before the cache
+// is used.
 func (c *LRUCache) LRU2(capPerBkt uint16) *LRUCache {
+	capPerBkt = max(capPerBkt, 1)
 	for i := range c.shards {
 		c.shards[i][1] = newLRUShard(capPerBkt)
 	}

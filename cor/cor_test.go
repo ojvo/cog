@@ -1,11 +1,14 @@
 package cor
 
 import (
-	"c.n/ojv/cog/cfg"
+	"context"
+	"ojv/cog/cfg"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 func TestCoreFacade(t *testing.T) {
@@ -262,4 +265,177 @@ func BenchmarkCore_LockFreeGet(b *testing.B) {
 			_ = GetString("key")
 		}
 	})
+}
+
+// ---------------------------------------------------------------------------
+// Lifecycle tests
+// ---------------------------------------------------------------------------
+
+func TestKernel_BaseContext(t *testing.T) {
+	k := &Kernel{}
+	ctx := k.BaseContext()
+	if ctx == nil {
+		t.Fatal("BaseContext returned nil")
+	}
+
+	// Context should initially be not cancelled
+	select {
+	case <-ctx.Done():
+		t.Fatal("BaseContext should not be cancelled initially")
+	default:
+	}
+}
+
+func TestKernel_BaseContextCancelOnExit(t *testing.T) {
+	k := &Kernel{}
+	ctx := k.BaseContext()
+
+	k.Exit()
+
+	// Context must be cancelled after Exit
+	select {
+	case <-ctx.Done():
+		// OK
+	default:
+		t.Fatal("BaseContext should be cancelled after Exit")
+	}
+}
+
+func TestKernel_ExitIdempotent(t *testing.T) {
+	k := &Kernel{}
+	_ = k.BaseContext() // init interrupt
+
+	// Multiple calls should not panic
+	k.Exit()
+	k.Exit()
+	k.Exit()
+}
+
+func TestKernel_RunWithExit(t *testing.T) {
+	k := &Kernel{}
+	_ = k.BaseContext() // init interrupt
+
+	done := make(chan struct{})
+	go func() {
+		k.Run() // should return quickly because we call Exit
+		close(done)
+	}()
+
+	// Small delay ensures Run is waiting
+	// Then programmatically trigger exit
+	k.Exit()
+
+	// Wait for Run to return (with timeout)
+	select {
+	case <-done:
+		// OK
+	case <-doneFromTimeout(2 * time.Second):
+		t.Fatal("Run did not return after Exit within timeout")
+	}
+}
+
+func TestKernel_RunAlreadyExited(t *testing.T) {
+	k := &Kernel{}
+	_ = k.BaseContext()
+	k.Exit()
+
+	// Run after exit should return immediately without blocking
+	done := make(chan struct{})
+	go func() {
+		k.Run()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// OK
+	case <-doneFromTimeout(time.Second):
+		t.Fatal("Run after exit should return immediately")
+	}
+}
+
+func TestKernel_ExitCalledBeforeBaseContext(t *testing.T) {
+	// Exit without BaseContext call should not panic
+	k := &Kernel{}
+	k.Exit()
+	k.Exit() // idempotent
+}
+
+func TestLifecycle_PackageLevel(t *testing.T) {
+	// Package-level functions should not panic on a new default kernel
+	// Note: these use defaultKernel which persists across tests
+	// Just verify they don't panic
+	ctx := BaseContext()
+	if ctx == nil {
+		t.Fatal("package BaseContext returned nil")
+	}
+}
+
+// doneFromTimeout creates a channel that receives after the given duration.
+// Used as a helper to avoid importing time in select patterns.
+func doneFromTimeout(d time.Duration) <-chan time.Time {
+	return time.After(d)
+}
+
+// TestKernel_EnsureBaseContextConcurrent verifies that concurrent
+// BaseContext/Exit/Run callers observe a single, consistent baseCtx + interrupt
+// pair. Before the sync.Once fix, each caller could run initBaseContext() and
+// overwrite the fields, leaking the first context and replacing the
+// signal.Notify channel out from under Run.
+func TestKernel_EnsureBaseContextConcurrent(t *testing.T) {
+	const goroutines = 64
+	k := &Kernel{}
+
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+
+	// Collect contexts returned by BaseContext across goroutines; they must
+	// all be the same pointer (proving initOnce ran exactly once).
+	ctxs := make([]context.Context, goroutines)
+	var ready sync.WaitGroup
+	ready.Add(1)
+
+	for i := 0; i < goroutines; i++ {
+		i := i
+		go func() {
+			defer wg.Done()
+			ready.Wait() // burst all goroutines simultaneously
+			ctxs[i] = k.BaseContext()
+		}()
+	}
+	ready.Done()
+	wg.Wait()
+
+	first := ctxs[0]
+	if first == nil {
+		t.Fatal("BaseContext returned nil")
+	}
+	for i := 1; i < goroutines; i++ {
+		if ctxs[i] != first {
+			t.Fatalf("goroutine %d got a different context: initOnce did not serialize", i)
+		}
+	}
+}
+
+// TestKernel_ExitBeforeRunDoesNotPanic verifies the edge case where Exit is
+// called before Run/BaseContext: ensureBaseContext in Exit must initialize
+// baseCtxCancel so the onceExit block can call it safely.
+func TestKernel_ExitBeforeRunDoesNotPanic(t *testing.T) {
+	k := &Kernel{}
+	// Exit first — should not panic and should mark exited.
+	k.Exit()
+	if !k.exited.Load() {
+		t.Fatal("exited flag not set after Exit")
+	}
+	// Run after Exit must return immediately.
+	done := make(chan struct{})
+	go func() {
+		k.Run()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-doneFromTimeout(2 * time.Second):
+		t.Fatal("Run after Exit should return immediately")
+	}
 }

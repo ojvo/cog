@@ -14,7 +14,7 @@ import (
 	"sync"
 	"time"
 
-	"c.n/ojv/cog/procmgmt"
+	"ojv/cog/proc"
 )
 
 // Errors returned by Cmd operations.
@@ -265,7 +265,7 @@ func (c *Cmd) run() error {
 
 	cmd.Dir = c.Dir
 	cmd.Env = c.Env
-	procmgmt.SetPgid(cmd)
+	proc.SetPgid(cmd)
 
 	// Merge writers: internal buffers + optional user writers.
 	var writersOut []io.Writer
@@ -370,7 +370,7 @@ func (c *Cmd) Stop() {
 		return
 	}
 	c.cancel()
-	_ = procmgmt.KillGroup(c.stdcmd)
+	_ = proc.KillGroup(c.stdcmd)
 }
 
 // killSignal sends a custom signal to the process.

@@ -442,3 +442,32 @@ func TestLRU_ReuseAfterEviction(t *testing.T) {
 		t.Fatalf("Get(d) = %v, %v, want 4, true", v, ok)
 	}
 }
+
+// TestNewLRUCache_ZeroSizingNormalizes verifies that zero-valued dimensions
+// form a valid, minimal cache instead of causing an input-driven panic.
+func TestNewLRUCache_ZeroSizingNormalizes(t *testing.T) {
+	c := NewLRUCache(0, 0)
+	if len(c.shards) != 1 {
+		t.Fatalf("len(shards) = %d, want 1", len(c.shards))
+	}
+	if len(c.shards[0][0].items) != 1 {
+		t.Fatalf("level-0 capacity = %d, want 1", len(c.shards[0][0].items))
+	}
+	c.Put("key", "value")
+	if v, ok := c.Get("key"); !ok || v != "value" {
+		t.Fatalf("Get(key) = %v, %v, want value, true", v, ok)
+	}
+}
+
+// TestLRU2_ZeroCapacityNormalizes verifies that the optional LRU-2 level has
+// the same safe zero-value behavior as the primary cache.
+func TestLRU2_ZeroCapacityNormalizes(t *testing.T) {
+	c := NewLRUCache(1, 1).LRU2(0)
+	if len(c.shards[0][1].items) != 1 {
+		t.Fatalf("level-1 capacity = %d, want 1", len(c.shards[0][1].items))
+	}
+	c.Put("key", "value")
+	if v, ok := c.Get("key"); !ok || v != "value" {
+		t.Fatalf("Get(key) = %v, %v, want value, true", v, ok)
+	}
+}

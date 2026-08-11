@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"time"
 
-	"c.n/ojv/cog/store"
+	"ojv/cog/store"
 )
 
 // This demo shows Cache + SegmentedWAL tiered storage:

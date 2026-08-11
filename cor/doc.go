@@ -6,6 +6,8 @@
 // Typical usage:
 //
 //	if err := cor.Init("config.cfg"); err != nil { ... }
-//	defer cor.Close()
-//	cor.Info("started")
+//	go func() { /* application logic, watch cor.BaseContext() for shutdown */ }()
+//	cor.Run() // blocks until signal, then graceful shutdown
+//
+// For programmatic exit without waiting for a signal, call cor.Exit().
 package cor
