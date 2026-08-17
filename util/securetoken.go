@@ -2,9 +2,21 @@ package util
 
 import (
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/hex"
 	"fmt"
 )
+
+// SecureEqual reports whether a and b match using a constant-time
+// comparison. Use this instead of `==` for security-sensitive strings
+// (auth tokens, API keys, signatures) to avoid timing side-channels.
+// An empty candidate never matches.
+func SecureEqual(a, b string) bool {
+	if a == "" || b == "" {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
+}
 
 // SecureToken generates a 32-char hex cryptographic random token.
 //
