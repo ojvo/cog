@@ -17,6 +17,7 @@ import (
 var (
 	ErrInvalidPath      = errors.New("invalid path")
 	ErrPathTraversal    = errors.New("path traversal detected")
+	ErrSymlinkEscape    = errors.New("path escapes work tree via symlink")
 	ErrSnapshotNotFound = errors.New("snapshot not found")
 	ErrNoChanges        = errors.New("no changes to commit")
 )
@@ -28,8 +29,42 @@ type checkpoint struct {
 	changes map[string]string
 }
 
+// virtualFilesMetaKey is the reserved Metadata key under which virtual files
+// (extra files with absolute paths outside the work tree: task memory and other
+// caller blobs) are recorded. They are not workspace content, so they never
+// enter the snapshot tree; this key lets a snapshot still expose them through
+// the flat file view. Callers must not use it themselves.
+const virtualFilesMetaKey = "vcs_virtual_files"
+
+// checkoutRestoreChunkBytes bounds how much restored content Checkout buffers
+// before flushing a batch write. It trades a few extra directory fsyncs for a
+// flat memory ceiling: without it, restoring a large tree would hold every
+// file's content in memory at once.
+const checkoutRestoreChunkBytes = 32 << 20 // 32 MiB
+
 // Manager versions a work tree using a content-addressed object store and a
-// parent-linked snapshot chain. It is safe for concurrent use.
+// parent-linked snapshot chain.
+//
+// Concurrency: within one Manager instance all operations are serialized by an
+// internal RWMutex. State-mutating operations (CommitPending, Checkout, GC)
+// additionally take a cross-process exclusive lock file in the state directory,
+// so multiple Manager instances — in the same process or in different
+// processes — may safely share one stateDir: the read-HEAD / write-HEAD
+// sequence is atomic, so concurrent commits chain onto each other instead of
+// orphaning snapshots. Reads (GetSnapshot, GetHEAD, DiffSnapshots) are
+// lock-free with respect to that file and only coordinate through the
+// in-process mutex; ListHistory takes the same lock so it never observes a
+// half-advanced chain.
+//
+// Scope of the shared-stateDir guarantee: the lock protects on-disk state
+// (HEAD, snapshots, objects). The in-memory pending-changes/checkpoint sets are
+// per-instance and are NOT coordinated across instances — each Manager commits
+// only the paths it recorded via RecordOldState. Concurrent writers of the same
+// path must therefore either share one Manager or use separate work trees.
+//
+// The cross-process lock is advisory and only coordinates code that goes
+// through a Manager; a lock whose owner process has died is reclaimed after a
+// stale timeout so a crash cannot wedge the state directory.
 type Manager struct {
 	baseDir        string
 	workDir        string
@@ -79,11 +114,6 @@ func (v *Manager) Init() error {
 	return nil
 }
 
-// GetStore returns the underlying object store.
-func (v *Manager) GetStore() *ObjectStore {
-	return v.store
-}
-
 // PutBlob stores arbitrary bytes in the object store and returns their content
 // hash. It is the mechanism for versioning non-workspace state alongside the
 // work tree (e.g. task memory), referenced from snapshot metadata via a hash.
@@ -97,21 +127,72 @@ func (v *Manager) GetBlob(hash string) ([]byte, error) {
 }
 
 // isValidPath reports whether path (relative or absolute) resolves inside the
-// work tree. It rejects empty paths and path traversal.
+// work tree. It rejects empty paths, lexical path traversal, and paths that
+// escape the work tree through a symlinked ancestor.
+//
+// The lexical check is not sufficient on its own: a directory inside the work
+// tree may be a symlink pointing outside it. A path like "link/out.txt" is
+// lexically contained but resolves to a file beyond the boundary, so checkout
+// and rollback would silently write outside the work tree. To close that, the
+// deepest already-existing ancestor of the resolved path is evaluated with
+// EvalSymlinks and re-checked for containment.
 func (v *Manager) isValidPath(path string) error {
 	if path == "" {
 		return ErrInvalidPath
 	}
-	if v.workDir != "" {
-		absPath := path
-		if !filepath.IsAbs(path) {
-			absPath = filepath.Join(v.workDir, path)
+	if v.workDir == "" {
+		return nil
+	}
+
+	absPath := path
+	if !filepath.IsAbs(path) {
+		absPath = filepath.Join(v.workDir, path)
+	}
+	cleanPath := filepath.Clean(absPath)
+	cleanWorkDir := filepath.Clean(v.workDir)
+	if !strings.HasPrefix(cleanPath, cleanWorkDir+string(filepath.Separator)) && cleanPath != cleanWorkDir {
+		return ErrPathTraversal
+	}
+
+	return v.checkNoSymlinkEscape(cleanPath, cleanWorkDir)
+}
+
+// checkNoSymlinkEscape verifies that the deepest existing ancestor of
+// cleanPath resolves to a location still inside cleanWorkDir. Paths that do
+// not exist yet are validated against their nearest existing ancestor, so
+// "new/dir/file.txt" is checked at "new" (or higher) rather than failing.
+// cleanWorkDir is itself resolved so that a symlinked workDir root (e.g.
+// /tmp on macOS) does not produce false positives.
+func (v *Manager) checkNoSymlinkEscape(cleanPath, cleanWorkDir string) error {
+	resolvedWork, err := filepath.EvalSymlinks(cleanWorkDir)
+	if err != nil {
+		// Work tree root itself is unresolvable; fall back to the lexical
+		// containment already established by the caller.
+		resolvedWork = cleanWorkDir
+	}
+
+	ancestor := cleanPath
+	for {
+		if _, err := os.Lstat(ancestor); err == nil {
+			break
 		}
-		cleanPath := filepath.Clean(absPath)
-		cleanWorkDir := filepath.Clean(v.workDir)
-		if !strings.HasPrefix(cleanPath, cleanWorkDir+string(filepath.Separator)) && cleanPath != cleanWorkDir {
-			return ErrPathTraversal
+		parent := filepath.Dir(ancestor)
+		if parent == ancestor {
+			break
 		}
+		ancestor = parent
+	}
+
+	resolvedAncestor, err := filepath.EvalSymlinks(ancestor)
+	if err != nil {
+		// The ancestor exists but cannot be resolved (permissions, races).
+		// Fail closed rather than risk writing outside the work tree.
+		return fmt.Errorf("%w: cannot resolve %s", ErrSymlinkEscape, ancestor)
+	}
+
+	if resolvedAncestor != resolvedWork &&
+		!strings.HasPrefix(resolvedAncestor, resolvedWork+string(filepath.Separator)) {
+		return fmt.Errorf("%w: %s resolves to %s", ErrSymlinkEscape, cleanPath, resolvedAncestor)
 	}
 	return nil
 }
@@ -124,6 +205,31 @@ func (v *Manager) toRelPath(path string) string {
 		}
 	}
 	return path
+}
+
+// isRootedPath reports whether path is rooted: absolute, or starting with a
+// separator. A leading separator is rooted even on Windows (where such a path
+// has no drive but still means "from the root of the current drive"), so this
+// is stricter than filepath.IsAbs and treats "/x" as rooted on every platform.
+func isRootedPath(path string) bool {
+	return filepath.IsAbs(path) || strings.HasPrefix(path, "/") || strings.HasPrefix(path, `\`)
+}
+
+// isVirtualExtraPath reports whether an extra file is a virtual file rather
+// than a work-tree path. Virtual files are the caller's own blobs (task
+// memory, etc.): they are recorded for diffing but must never be treated as
+// restorable workspace content. A path is virtual when it is rooted and does
+// not resolve inside the work tree; relPath is the pre-computed toRelPath
+// result.
+func (v *Manager) isVirtualExtraPath(path, relPath string) bool {
+	if v.workDir == "" || !isRootedPath(path) {
+		return false
+	}
+	if relPath == path {
+		// Different volume or otherwise unresolvable relative to workDir.
+		return true
+	}
+	return relPath == ".." || strings.HasPrefix(relPath, ".."+string(filepath.Separator))
 }
 
 // RecordOldState captures the current state of absPath before it is modified,
@@ -173,7 +279,7 @@ func (v *Manager) RecordOldStateIn(id, absPath string) error {
 			cp.changes[absPath] = ""
 			return nil
 		}
-		hash, err := v.store.Put(absPath)
+		hash, _, err := v.store.Put(absPath)
 		if err != nil {
 			return fmt.Errorf("vcs store put failed: %w", err)
 		}
@@ -190,7 +296,7 @@ func (v *Manager) RecordOldStateIn(id, absPath string) error {
 		return nil
 	}
 
-	hash, err := v.store.Put(absPath)
+	hash, _, err := v.store.Put(absPath)
 	if err != nil {
 		return fmt.Errorf("vcs store put failed: %w", err)
 	}
@@ -235,6 +341,15 @@ func (v *Manager) rollbackChangesLocked(changes map[string]string) error {
 	successPaths := make([]string, 0, len(changes))
 
 	for absPath, oldHash := range changes {
+		// Re-validate at write time: a symlink may have appeared since the
+		// path was recorded, and rollback writes directly to disk. Without
+		// this, a late symlink swap could redirect the restore outside the
+		// work tree. Fail closed and keep the entry pending.
+		if err := v.isValidPath(absPath); err != nil {
+			rollbackErrors = append(rollbackErrors, fmt.Errorf("refusing to restore %s: %w", absPath, err))
+			continue
+		}
+
 		if oldHash == "" {
 			if err := os.Remove(absPath); err != nil && !os.IsNotExist(err) {
 				rollbackErrors = append(rollbackErrors, fmt.Errorf("failed to remove %s: %w", absPath, err))
@@ -327,6 +442,31 @@ func (v *Manager) ForgetPending(absPath string) {
 func (v *Manager) CommitPending(message string, metadata map[string]string, extraFiles map[string]string) (*Snapshot, error) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
+	return v.commitPendingLocked(message, metadata, extraFiles)
+}
+
+// commitPendingLocked performs the commit while v.mu is held. The cross-process
+// state-dir lock is taken inside so that the read-HEAD / write-HEAD sequence is
+// atomic across Managers and processes sharing this state directory: without
+// it, two concurrent commits read the same parent, both write HEAD, and the
+// first becomes an orphaned snapshot no longer reachable from HEAD.
+func (v *Manager) commitPendingLocked(message string, metadata map[string]string, extraFiles map[string]string) (*Snapshot, error) {
+	var snap *Snapshot
+	err := v.withStateLock(func() error {
+		s, err := v.commitPendingUnderLock(message, metadata, extraFiles)
+		if err != nil {
+			return err
+		}
+		snap = s
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return snap, nil
+}
+
+func (v *Manager) commitPendingUnderLock(message string, metadata map[string]string, extraFiles map[string]string) (*Snapshot, error) {
 
 	// 防御性合并残留 checkpoint:正常流程下子代理已在 runSubAgent 收口时
 	// commit/rollback 干净,但若因 panic/异常路径残留,必须合并进回合级 pending,
@@ -344,26 +484,65 @@ func (v *Manager) CommitPending(message string, metadata map[string]string, extr
 		return nil, nil
 	}
 
-	newFiles := make(map[string]string)
-
-	// A HEAD read failure or corrupted base snapshot must be fatal: otherwise
-	// the commit would silently drop all prior baseline files.
+	// Seed the builder from the parent's root tree, lazily: only directories
+	// along a changed path are read. Unchanged subtrees keep their hash and are
+	// neither re-read nor re-written, so commit cost is O(changes), not O(tree).
 	headID, err := v.readHEAD()
 	if err != nil {
 		return nil, fmt.Errorf("failed to read HEAD: %w", err)
 	}
+
+	builder := newTreeBuilder()
+	parentVirtual := map[string]string{}
 	if headID != "" {
 		headSnap, err := v.getSnapshot(headID)
 		if err != nil {
 			return nil, fmt.Errorf("failed to load parent snapshot %s: %w", headID, err)
 		}
-		for path, hash := range headSnap.Files {
-			newFiles[v.toRelPath(path)] = hash
+		builder = newBuilderFromTree(v.store, headSnap.Tree)
+		if raw := headSnap.Metadata[virtualFilesMetaKey]; raw != "" {
+			_ = json.Unmarshal([]byte(raw), &parentVirtual)
 		}
 	}
 
+	// extraFiles: caller-supplied entries. Validate before the snapshot exists.
+	// Virtual files (absolute paths outside the work tree) are metadata, not
+	// workspace content: they live in Metadata under a reserved key so they
+	// never enter the tree, where a leading-separator path has no segment form.
+	virtualFiles := map[string]string{}
 	for path, hash := range extraFiles {
-		newFiles[v.toRelPath(path)] = hash
+		// Never trust caller-supplied hashes: a hash that is malformed, whose
+		// object is absent, or that is claimed for a workspace path escaping the
+		// work tree would produce a HEAD that diffs against content nothing can
+		// ever restore. Validate before the snapshot is created.
+		if err := isValidHash(hash); err != nil {
+			return nil, fmt.Errorf("extra file %s: invalid content hash %q: %w", path, hash, err)
+		}
+		if !v.store.Exists(hash) {
+			return nil, fmt.Errorf("extra file %s: object %s not found in store", path, hash[:12])
+		}
+		relPath := v.toRelPath(path)
+		if v.isVirtualExtraPath(path, relPath) {
+			// A path that stays outside the work tree is a virtual file: the
+			// caller's own blob (e.g. task memory) recorded by its original
+			// path. It is metadata, not workspace content, so Checkout never
+			// restores it and no work-tree containment rule applies to it.
+			virtualFiles[path] = hash
+			continue
+		}
+		if err := v.isValidPath(relPath); err != nil {
+			return nil, fmt.Errorf("extra file %s: %w", path, err)
+		}
+		if v.isIgnoredPath(relPath) {
+			return nil, fmt.Errorf("extra file %s: paths inside the vcs metadata directory are not versionable", path)
+		}
+		exec, err := v.store.objectExec(hash)
+		if err != nil {
+			return nil, fmt.Errorf("extra file %s: %w", path, err)
+		}
+		if err := builder.add(relPath, hash, exec); err != nil {
+			return nil, fmt.Errorf("extra file %s: %w", path, err)
+		}
 	}
 
 	// Decide from the current on-disk state, not the recorded old hash: a file
@@ -373,20 +552,43 @@ func (v *Manager) CommitPending(message string, metadata map[string]string, extr
 
 		if _, err := os.Stat(absPath); err != nil {
 			if os.IsNotExist(err) {
-				delete(newFiles, relPath)
+				if err := builder.remove(relPath); err != nil {
+					return nil, fmt.Errorf("failed to record deletion of %s: %w", relPath, err)
+				}
 				continue
 			}
 			return nil, fmt.Errorf("failed to stat %s: %w", absPath, err)
 		}
 
-		hash, err := v.store.Put(absPath)
+		hash, exec, err := v.store.Put(absPath)
 		if err != nil {
 			return nil, fmt.Errorf("failed to store %s: %w", absPath, err)
 		}
-		newFiles[relPath] = hash
+		if err := builder.add(relPath, hash, exec); err != nil {
+			return nil, fmt.Errorf("failed to record %s: %w", relPath, err)
+		}
 	}
 
-	snap, err := v.createSnapshot(headID, message, newFiles, metadata)
+	rootTree, err := builder.build(v.store)
+	if err != nil {
+		return nil, fmt.Errorf("failed to build snapshot tree: %w", err)
+	}
+
+	// Carry virtual files forward from the parent so they behave like any other
+	// versioned entry: present until explicitly removed.
+	mergedMeta := metadata
+	if len(virtualFiles) > 0 || len(parentVirtual) > 0 {
+		combined := make(map[string]string, len(parentVirtual)+len(virtualFiles))
+		for p, h := range parentVirtual {
+			combined[p] = h
+		}
+		for p, h := range virtualFiles {
+			combined[p] = h
+		}
+		mergedMeta = mergeVirtualFiles(metadata, combined)
+	}
+
+	snap, err := v.createSnapshot(headID, message, rootTree, mergedMeta)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create commit snapshot: %w", err)
 	}
@@ -396,14 +598,26 @@ func (v *Manager) CommitPending(message string, metadata map[string]string, extr
 	return snap, nil
 }
 
+// mergeVirtualFiles returns metadata with the caller's virtual files merged
+// into the reserved key, without mutating the caller's map.
+func mergeVirtualFiles(metadata, incoming map[string]string) map[string]string {
+	merged := make(map[string]string, len(metadata)+1)
+	for k, v := range metadata {
+		merged[k] = v
+	}
+	encoded, _ := json.Marshal(incoming)
+	merged[virtualFilesMetaKey] = string(encoded)
+	return merged
+}
+
 // createSnapshot marshals a snapshot to disk and advances HEAD, removing the
 // snapshot file if the HEAD update fails.
-func (v *Manager) createSnapshot(parentID string, message string, files map[string]string, metadata map[string]string) (*Snapshot, error) {
+func (v *Manager) createSnapshot(parentID string, message string, rootTree string, metadata map[string]string) (*Snapshot, error) {
 	snapshot := &Snapshot{
 		ParentID:  parentID,
 		Timestamp: time.Now(),
 		Message:   message,
-		Files:     files,
+		Tree:      rootTree,
 		Metadata:  metadata,
 	}
 
@@ -471,12 +685,109 @@ func (v *Manager) getSnapshot(id string) (*Snapshot, error) {
 			return nil, fmt.Errorf("snapshot %s has invalid parent ID %q: %w", id, snap.ParentID, err)
 		}
 	}
-	for path, hash := range snap.Files {
-		if err := isValidHash(hash); err != nil {
-			return nil, fmt.Errorf("snapshot %s contains invalid hash for file %s: %w", id, path, err)
+	if snap.Tree != "" {
+		if err := isValidHash(snap.Tree); err != nil {
+			return nil, fmt.Errorf("snapshot %s has invalid tree hash %q: %w", id, snap.Tree, err)
 		}
 	}
 	return &snap, nil
+}
+
+// snapshotFiles returns the expanded path -> {hash, exec} table for a snapshot,
+// reading its tree objects. The result is cached on the snapshot so repeated
+// walks (Diff, Checkout planning) do not re-read the tree. A missing or corrupt
+// tree is an error, never a silent partial view.
+func (v *Manager) snapshotFiles(snap *Snapshot) (map[string]flatFile, error) {
+	if snap.files != nil {
+		return snap.files, nil
+	}
+	files := map[string]flatFile{}
+	if snap.Tree != "" {
+		expanded, trees, err := expandTree(v.store, snap.Tree, v.store.getObjectBytes)
+		if err != nil {
+			return nil, fmt.Errorf("failed to expand tree for snapshot %s: %w", snap.ID, err)
+		}
+		files = expanded
+		snap.trees = trees
+	}
+	// Merge back virtual files recorded in metadata; they are not tree entries.
+	if raw := snap.Metadata[virtualFilesMetaKey]; raw != "" {
+		var virtualFiles map[string]string
+		if err := json.Unmarshal([]byte(raw), &virtualFiles); err == nil {
+			for p, h := range virtualFiles {
+				files[p] = flatFile{hash: h}
+			}
+		}
+	}
+	snap.files = files
+	return files, nil
+}
+
+// execMode maps a recorded executable flag to the file mode used when restoring
+// a work-tree file. Only executability is versioned: an object's own permission
+// bits reflect whatever the platform gave the object file (0o444 read-only on
+// some file systems, 0o666 on Windows) and reproducing them literally would
+// make restored files read-only.
+func execMode(exec bool) fs.FileMode {
+	if exec {
+		return 0o755
+	}
+	return 0o644
+}
+
+// writeFileAtomic writes content to path via a temp file + rename, applying
+// mode. It is used for restoring work-tree files so a partially-written file is
+// never observed, and so the executable bit recorded at commit time survives
+// checkout.
+func (v *Manager) writeFileAtomic(path string, content []byte, mode fs.FileMode) error {
+	return store.AtomicWriteFile(path, content, mode)
+}
+
+// newBackupDir creates a fresh, empty directory for a checkout's file backup
+// under the VCS state directory (thereby invisible to the work-tree scan).
+func (v *Manager) newBackupDir() (string, error) {
+	tmpRoot := filepath.Join(v.baseDir, "tmp")
+	if err := os.MkdirAll(tmpRoot, 0o755); err != nil {
+		return "", fmt.Errorf("failed to create backup root %s: %w", tmpRoot, err)
+	}
+	dir, err := os.MkdirTemp(tmpRoot, "checkout-*")
+	if err != nil {
+		return "", fmt.Errorf("failed to create backup dir: %w", err)
+	}
+	return dir, nil
+}
+
+// copyToBackup copies the file at absPath into backupDir, keyed by relPath.
+// The parent directories are created as needed.
+func (v *Manager) copyToBackup(backupDir, relPath, absPath string) error {
+	data, err := os.ReadFile(absPath)
+	if err != nil {
+		return fmt.Errorf("failed to read %s: %w", relPath, err)
+	}
+	dst := filepath.Join(backupDir, relPath)
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return fmt.Errorf("failed to create backup dir for %s: %w", relPath, err)
+	}
+	return store.WriteFileSync(dst, data, 0o644)
+}
+
+// restoreFromBackup copies a backup entry back to absPath with the recorded
+// permission bits. It is the rollback counterpart of copyToBackup and uses the
+// same atomic write path as a normal checkout write.
+//
+// A path recorded as an existing restore target may have no backup entry (for
+// example the target was a directory, which is not backed up). That is not an
+// error: the pre-checkout state is already in place, so there is nothing to
+// restore.
+func (v *Manager) restoreFromBackup(backupDir, relPath, absPath string, mode fs.FileMode) error {
+	data, err := os.ReadFile(filepath.Join(backupDir, relPath))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("failed to read backup of %s: %w", relPath, err)
+	}
+	return v.writeFileAtomic(absPath, data, mode)
 }
 
 // GetHEAD returns the ID of the current HEAD snapshot ("" when none exists).
@@ -550,25 +861,35 @@ func (v *Manager) Checkout(id string) error {
 		absPath string
 		relPath string
 		hash    string
+		exec    bool
+	}
+	snapFiles, err := v.snapshotFiles(snap)
+	if err != nil {
+		return err
 	}
 	var ops []restoreOp
-	for path, hash := range snap.Files {
-		relPath := v.toRelPath(path)
+	for path, f := range snapFiles {
+		// Tree keys are always slash-separated (they are content-address
+		// inputs). Convert to the platform's relative form so they compare
+		// equal to the walk's relative paths — otherwise the same file appears
+		// once as "sub/f.txt" and once as "sub\f.txt" on Windows, and checkout
+		// would delete what it just restored.
+		relPath := filepath.FromSlash(path)
 		absPath := path
-		if !filepath.IsAbs(path) && v.workDir != "" {
-			absPath = filepath.Join(v.workDir, path)
+		if v.workDir != "" && !isRootedPath(path) {
+			absPath = filepath.Join(v.workDir, relPath)
 		}
 		// The resolved path must stay inside the work tree: this blocks path
-		// traversal from tampered snapshots, and skips virtual files (extra
-		// files with absolute paths outside workDir).
+		// traversal from tampered snapshots and symlink escapes, and skips
+		// virtual files (extra files with rooted paths outside workDir).
+		// It uses the same authority as record-time validation so the two can
+		// never drift.
 		if v.workDir != "" {
-			cleanAbs := filepath.Clean(absPath)
-			cleanWork := filepath.Clean(v.workDir)
-			if !strings.HasPrefix(cleanAbs, cleanWork+string(filepath.Separator)) && cleanAbs != cleanWork {
+			if err := v.isValidPath(absPath); err != nil {
 				continue
 			}
 		}
-		ops = append(ops, restoreOp{absPath: absPath, relPath: relPath, hash: hash})
+		ops = append(ops, restoreOp{absPath: absPath, relPath: relPath, hash: f.hash, exec: f.exec})
 		delete(currentFiles, relPath)
 	}
 
@@ -592,34 +913,97 @@ func (v *Manager) Checkout(id string) error {
 		return fmt.Errorf("checkout pre-check failed (%d errors), workspace untouched: %v", len(preCheckErrors), preCheckErrors)
 	}
 
-	backup := make(map[string][]byte)
+	// Backup the affected files to a temporary directory instead of holding
+	// them in memory: a checkout of a large work tree would otherwise buffer
+	// the entire old content (every extra file plus every restore target) in
+	// RAM, and a multi-GiB workspace could exhaust it before a single byte is
+	// restored. The temp dir lives under the VCS state directory, so it is
+	// ignored by the work-tree scan and never mistaken for workspace content,
+	// and it is removed unconditionally on every exit path.
+	backupDir, err := v.newBackupDir()
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(backupDir)
+
+	// backupModes records the permission to restore for every path that
+	// existed before this checkout; restoreTargetExisted records which backup
+	// entries the restore step will overwrite (as opposed to extra files,
+	// which are deleted and only need restoring on rollback).
+	backupModes := make(map[string]fs.FileMode)
 	restoreTargetExisted := make(map[string]bool)
 
-	for relPath := range currentFiles {
-		absPath := filepath.Join(v.workDir, relPath)
-		data, err := os.ReadFile(absPath)
+	// backupOne copies absPath under the backup dir, keyed by relPath. Missing
+	// files are recorded as "did not exist" (skip), not as an error: the set
+	// of files can change between the scan and here.
+	backupOne := func(relPath, absPath string) error {
+		info, err := os.Stat(absPath)
 		if err != nil {
-			continue
+			if os.IsNotExist(err) {
+				return nil
+			}
+			return fmt.Errorf("failed to stat %s: %w", relPath, err)
 		}
-		backup[relPath] = data
+		if info.IsDir() {
+			return nil
+		}
+		backupModes[relPath] = info.Mode().Perm()
+		return v.copyToBackup(backupDir, relPath, absPath)
 	}
 
+	// Fail closed: a backup that cannot be taken means a failure during
+	// restore would be unrecoverable, so abort before mutating the workspace.
+	for relPath := range currentFiles {
+		if err := backupOne(relPath, filepath.Join(v.workDir, relPath)); err != nil {
+			return fmt.Errorf("checkout backup failed, workspace untouched: %w", err)
+		}
+	}
 	for _, op := range ops {
 		if _, err := os.Stat(op.absPath); err == nil {
 			restoreTargetExisted[op.relPath] = true
-			data, err := os.ReadFile(op.absPath)
-			if err == nil {
-				backup[op.relPath] = data
-			}
+		}
+		if err := backupOne(op.relPath, op.absPath); err != nil {
+			return fmt.Errorf("checkout backup failed, workspace untouched: %w", err)
 		}
 	}
 
+	// Restore content and the recorded executable bit: a snapshot that loses a
+	// script's +x produces a workspace that no longer runs. Writes go through
+	// store.AtomicWriteFileBatch in byte-budgeted chunks so each affected
+	// directory is fsynced once per chunk instead of once per file, while peak
+	// memory stays bounded by the budget rather than by the total restored
+	// size: buffering every file's content at once would hold the whole work
+	// tree in RAM. Content is still read (and hash-verified) per object.
 	var restoreErrors []error
-	for _, op := range ops {
-		if err := v.store.Get(op.hash, op.absPath); err != nil {
-			restoreErrors = append(restoreErrors, fmt.Errorf("failed to restore %s: %w", op.relPath, err))
+	var chunk []store.BatchFile
+	chunkBytes := 0
+	flush := func() {
+		if len(chunk) == 0 {
+			return
 		}
+		if err := store.AtomicWriteFileBatch(chunk); err != nil {
+			restoreErrors = append(restoreErrors, fmt.Errorf("failed to write restored files: %w", err))
+		}
+		chunk = chunk[:0]
+		chunkBytes = 0
 	}
+	for _, op := range ops {
+		data, err := v.store.GetData(op.hash)
+		if err != nil {
+			restoreErrors = append(restoreErrors, fmt.Errorf("failed to restore %s: %w", op.relPath, err))
+			continue
+		}
+		if chunkBytes > 0 && chunkBytes+len(data) > checkoutRestoreChunkBytes {
+			flush()
+		}
+		chunk = append(chunk, store.BatchFile{
+			Path: op.absPath,
+			Data: data,
+			Perm: execMode(op.exec),
+		})
+		chunkBytes += len(data)
+	}
+	flush()
 
 	for relPath := range currentFiles {
 		absPath := filepath.Join(v.workDir, relPath)
@@ -628,33 +1012,52 @@ func (v *Manager) Checkout(id string) error {
 		}
 	}
 
-	rollbackWorkspace := func() {
+	// rollbackWorkspace undoes the partial checkout, returning the errors it
+	// hit. Reporting these is not optional: a silent failure here leaves the
+	// work tree in a half-restored state while the caller is told it was
+	// rolled back.
+	//
+	// Restoring a path means copying it back from backupDir; a path that was
+	// recorded as a restore target but is absent from the backup did not exist
+	// before, so rollback removes it instead.
+	rollbackWorkspace := func() []error {
+		var rollbackErrors []error
 		for _, op := range ops {
-			content, hasBackup := backup[op.relPath]
-			if hasBackup {
-				_ = os.WriteFile(op.absPath, content, 0o644)
+			if restoreTargetExisted[op.relPath] {
+				if err := v.restoreFromBackup(backupDir, op.relPath, op.absPath, backupModes[op.relPath]); err != nil {
+					rollbackErrors = append(rollbackErrors, fmt.Errorf("failed to restore %s: %w", op.relPath, err))
+				}
 				continue
 			}
-			if !restoreTargetExisted[op.relPath] {
-				_ = os.Remove(op.absPath)
+			if err := os.Remove(op.absPath); err != nil && !os.IsNotExist(err) {
+				rollbackErrors = append(rollbackErrors, fmt.Errorf("failed to remove %s: %w", op.relPath, err))
 			}
 		}
-		for relPath, content := range backup {
+		for relPath := range backupModes {
 			if restoreTargetExisted[relPath] {
-				continue
+				continue // already handled above as a restore target
 			}
 			absPath := filepath.Join(v.workDir, relPath)
-			_ = os.WriteFile(absPath, content, 0o644)
+			if err := v.restoreFromBackup(backupDir, relPath, absPath, backupModes[relPath]); err != nil {
+				rollbackErrors = append(rollbackErrors, fmt.Errorf("failed to restore %s: %w", relPath, err))
+			}
 		}
+		return rollbackErrors
 	}
 
 	if len(restoreErrors) > 0 {
-		rollbackWorkspace()
+		if rbErrors := rollbackWorkspace(); len(rbErrors) > 0 {
+			return fmt.Errorf("checkout failed with %d errors and rollback was incomplete (%d errors); workspace may be partially restored: %v; rollback errors: %v",
+				len(restoreErrors), len(rbErrors), restoreErrors, rbErrors)
+		}
 		return fmt.Errorf("checkout failed with %d errors, workspace rolled back: %v", len(restoreErrors), restoreErrors)
 	}
 
 	if err := store.AtomicWriteFile(v.headFile, []byte(id), 0o644); err != nil {
-		rollbackWorkspace()
+		if rbErrors := rollbackWorkspace(); len(rbErrors) > 0 {
+			return fmt.Errorf("checkout updated workspace but failed to update HEAD and rollback was incomplete (%d errors); workspace may be partially restored: %w; rollback errors: %v",
+				len(rbErrors), err, rbErrors)
+		}
 		return fmt.Errorf("checkout updated workspace but failed to update HEAD; workspace rolled back: %w", err)
 	}
 
@@ -664,10 +1067,35 @@ func (v *Manager) Checkout(id string) error {
 }
 
 // ListHistory returns up to limit snapshots walking backward from HEAD.
+//
+// HEAD itself is always expected to resolve: if it does not, that is genuine
+// corruption and is reported as an error (with any prefix collected) rather
+// than silently presenting an empty or partial history. An ancestor that
+// cannot be read ends the walk cleanly: the tail beyond it was pruned by GC,
+// which is the normal retention boundary and not an error.
 func (v *Manager) ListHistory(limit int) ([]*Snapshot, error) {
 	v.mu.RLock()
 	defer v.mu.RUnlock()
 
+	var history []*Snapshot
+	var chainErr error
+	err := v.withStateLock(func() error {
+		h, err := v.listHistoryLocked(limit)
+		history = h
+		chainErr = err
+		return nil
+	})
+	if err != nil {
+		return history, err
+	}
+	return history, chainErr
+}
+
+// listHistoryLocked walks the snapshot chain from HEAD. Callers must hold both
+// the per-instance lock and the cross-process state-dir lock so that the walk
+// never observes a HEAD advanced by a concurrent commit in another Manager.
+// The first (HEAD) snapshot must resolve; a missing ancestor ends the walk.
+func (v *Manager) listHistoryLocked(limit int) ([]*Snapshot, error) {
 	headID, err := v.readHEAD()
 	if err != nil {
 		return nil, err
@@ -681,7 +1109,11 @@ func (v *Manager) ListHistory(limit int) ([]*Snapshot, error) {
 	for currentID != "" && len(history) < limit {
 		snap, err := v.getSnapshot(currentID)
 		if err != nil {
-			break
+			if len(history) == 0 {
+				return nil, fmt.Errorf("HEAD snapshot %s is unreadable: %w", currentID, err)
+			}
+			// Reached the end of retained history (pruned ancestor).
+			return history, nil
 		}
 		history = append(history, snap)
 		currentID = snap.ParentID
@@ -695,37 +1127,53 @@ func (v *Manager) DiffSnapshots(oldID, newID string) (map[string]FileDiff, error
 	v.mu.RLock()
 	defer v.mu.RUnlock()
 
-	var oldFiles map[string]string
+	var oldFiles map[string]flatFile
 	if oldID != "" {
 		oldSnap, err := v.getSnapshot(oldID)
 		if err != nil {
 			return nil, err
 		}
-		oldFiles = oldSnap.Files
+		oldFiles, err = v.snapshotFiles(oldSnap)
+		if err != nil {
+			return nil, err
+		}
 	} else {
-		oldFiles = make(map[string]string)
+		oldFiles = make(map[string]flatFile)
 	}
 
 	newSnap, err := v.getSnapshot(newID)
 	if err != nil {
 		return nil, err
 	}
-	newFiles := newSnap.Files
+	newFiles, err := v.snapshotFiles(newSnap)
+	if err != nil {
+		return nil, err
+	}
 
 	diffs := make(map[string]FileDiff)
 
-	for path, oldHash := range oldFiles {
-		newHash, exists := newFiles[path]
+	// Tree keys are slash-separated; present them in the platform's relative
+	// form so callers see the same paths as before tree storage (and the same
+	// form Checkout uses).
+	toPlatform := func(p string) string {
+		if filepath.IsAbs(p) {
+			return p
+		}
+		return filepath.FromSlash(p)
+	}
+
+	for path, oldFile := range oldFiles {
+		newFile, exists := newFiles[path]
 		if !exists {
-			diffs[path] = FileDiff{Status: DiffDeleted, OldHash: oldHash}
-		} else if oldHash != newHash {
-			diffs[path] = FileDiff{Status: DiffModified, OldHash: oldHash, NewHash: newHash}
+			diffs[toPlatform(path)] = FileDiff{Status: DiffDeleted, OldHash: oldFile.hash}
+		} else if oldFile.hash != newFile.hash {
+			diffs[toPlatform(path)] = FileDiff{Status: DiffModified, OldHash: oldFile.hash, NewHash: newFile.hash}
 		}
 	}
 
-	for path, newHash := range newFiles {
+	for path, newFile := range newFiles {
 		if _, exists := oldFiles[path]; !exists {
-			diffs[path] = FileDiff{Status: DiffAdded, NewHash: newHash}
+			diffs[toPlatform(path)] = FileDiff{Status: DiffAdded, NewHash: newFile.hash}
 		}
 	}
 
@@ -739,6 +1187,20 @@ func (v *Manager) DiffSnapshots(oldID, newID string) (map[string]FileDiff, error
 func (v *Manager) GC(keepLast int) (int, error) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
+
+	var deleted int
+	err := v.withStateLock(func() error {
+		d, err := v.gcLocked(keepLast)
+		deleted = d
+		return err
+	})
+	if err != nil {
+		return deleted, err
+	}
+	return deleted, nil
+}
+
+func (v *Manager) gcLocked(keepLast int) (int, error) {
 
 	snapDir := filepath.Join(v.baseDir, "snapshots")
 	entries, err := os.ReadDir(snapDir)
@@ -766,7 +1228,11 @@ func (v *Manager) GC(keepLast int) (int, error) {
 		keepCount = 1
 	}
 
+	// keepSnaps caches the snapshots loaded while walking the chain, so the
+	// second pass below reuses them instead of re-reading, re-parsing and
+	// re-verifying each snapshot file (and its parent link) a second time.
 	keepSet := make(map[string]bool)
+	keepSnaps := make(map[string]*Snapshot)
 	headID, err := v.readHEAD()
 	if err != nil {
 		return 0, fmt.Errorf("failed to read HEAD: %w", err)
@@ -786,6 +1252,7 @@ func (v *Manager) GC(keepLast int) (int, error) {
 		if err != nil {
 			return 0, fmt.Errorf("snapshot chain broken at %s: %w; refusing to GC", currentID[:12], err)
 		}
+		keepSnaps[currentID] = snap
 		currentID = snap.ParentID
 	}
 
@@ -795,14 +1262,17 @@ func (v *Manager) GC(keepLast int) (int, error) {
 		return 0, fmt.Errorf("HEAD %s points to a missing snapshot; refusing to GC %d snapshots (state inconsistent)", headID[:12], len(allSnaps))
 	}
 
+	// Delete stale snapshots first. This must be fail-closed: if a snapshot
+	// file cannot be removed (permissions, file locks, read-only media), it
+	// still exists on disk and still references its objects. Pruning objects
+	// in that state would leave a readable snapshot whose content is gone,
+	// silently corrupting recoverable history. So any deletion failure aborts
+	// the whole GC before object pruning begins.
 	deletedSnapshots := 0
-	for id := range allSnaps {
-		if !keepSet[id] {
-			if err := os.Remove(filepath.Join(snapDir, id+".json")); err == nil {
-				deletedSnapshots++
-			}
-		}
+	if err := v.deleteSnapshots(snapDir, allSnaps, keepSet); err != nil {
+		return deletedSnapshots, err
 	}
+	deletedSnapshots = len(allSnaps) - len(keepSet)
 
 	keepHashes := make(map[string]bool)
 
@@ -820,18 +1290,25 @@ func (v *Manager) GC(keepLast int) (int, error) {
 		}
 	}
 
-	for id := range keepSet {
-		snap, err := v.getSnapshot(id)
-		if err == nil {
-			for _, hash := range snap.Files {
+	for id, snap := range keepSnaps {
+		// Mark the snapshot's tree, every subtree, and every blob reachable
+		// from it. Tree objects are stored objects too: missing them here would
+		// delete a kept snapshot's ability to be expanded.
+		files, err := v.snapshotFiles(snap)
+		if err != nil {
+			return deletedSnapshots, fmt.Errorf("failed to expand kept snapshot %s: %w", id[:12], err)
+		}
+		for _, f := range files {
+			keepHashes[f.hash] = true
+		}
+		for treeHash := range snap.trees {
+			keepHashes[treeHash] = true
+		}
+		// 保护快照 metadata 里引用的对象 hash(如 memory_hash)。这样把
+		// 任务记忆等非工作树状态以 blob 形式版本化时,GC 不会误删它们。
+		for _, hash := range snap.Metadata {
+			if isValidHash(hash) == nil {
 				keepHashes[hash] = true
-			}
-			// 保护快照 metadata 里引用的对象 hash(如 memory_hash)。这样把
-			// 任务记忆等非工作树状态以 blob 形式版本化时,GC 不会误删它们。
-			for _, hash := range snap.Metadata {
-				if isValidHash(hash) == nil {
-					keepHashes[hash] = true
-				}
 			}
 		}
 	}
@@ -842,4 +1319,21 @@ func (v *Manager) GC(keepLast int) (int, error) {
 	}
 
 	return deletedSnapshots + deletedObjects, nil
+}
+
+// deleteSnapshots removes every snapshot in allSnaps that is not in keepSet.
+// It is all-or-nothing in spirit: the first removal failure is returned
+// immediately so the caller can abort before pruning objects. Snapshots
+// already removed before the failure stay removed (they are unambiguously
+// garbage); the caller must not report a partial count as success.
+func (v *Manager) deleteSnapshots(snapDir string, allSnaps, keepSet map[string]bool) error {
+	for id := range allSnaps {
+		if keepSet[id] {
+			continue
+		}
+		if err := os.Remove(filepath.Join(snapDir, id+".json")); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("failed to delete snapshot %s: %w; refusing to prune objects", id[:12], err)
+		}
+	}
+	return nil
 }

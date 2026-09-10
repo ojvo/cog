@@ -2,14 +2,51 @@ package vcs
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"ojv/cog/store"
 )
+
+// snapFileTable expands a snapshot's tree into the flat path -> hash view used
+// by tests that predate content-addressed trees. It fails the test on error so
+// a corrupt tree can never be mistaken for an empty one.
+func snapFileTable(t *testing.T, mgr *Manager, snap *Snapshot) map[string]string {
+	t.Helper()
+	files, err := mgr.snapshotFiles(snap)
+	if err != nil {
+		t.Fatalf("failed to expand snapshot %s: %v", snap.ID, err)
+	}
+	out := make(map[string]string, len(files))
+	for p, f := range files {
+		out[p] = f.hash
+	}
+	return out
+}
+
+// buildRootTree stores the given path -> hash table as tree objects and returns
+// the root tree hash, for tests that need to hand-craft a snapshot.
+func buildRootTree(t *testing.T, mgr *Manager, files map[string]string) string {
+	t.Helper()
+	b := newTreeBuilder()
+	for p, h := range files {
+		if err := b.add(p, h, false); err != nil {
+			t.Fatalf("failed to add %s to tree: %v", p, err)
+		}
+	}
+	root, err := b.build(mgr.store)
+	if err != nil {
+		t.Fatalf("failed to build tree: %v", err)
+	}
+	return root
+}
 
 func TestIsValidPath(t *testing.T) {
 	tmpDir, err := os.MkdirTemp("", "vcs-path-test-*")
@@ -81,8 +118,8 @@ func TestNewManager(t *testing.T) {
 		t.Fatal("NewManager returned nil")
 	}
 
-	if mgr.GetStore() == nil {
-		t.Error("GetStore returned nil")
+	if mgr.store == nil {
+		t.Error("manager object store is nil")
 	}
 }
 
@@ -296,7 +333,7 @@ func TestManager_CommitPending_WithExtraFiles(t *testing.T) {
 
 	mgr := NewManager(tmpDir, tmpDir)
 
-	store := mgr.GetStore()
+	store := mgr.store
 	extraContent := []byte("extra file content")
 	extraHash, err := store.PutData(extraContent)
 	if err != nil {
@@ -314,7 +351,7 @@ func TestManager_CommitPending_WithExtraFiles(t *testing.T) {
 		t.Fatal("CommitPending returned nil snapshot")
 	}
 
-	if _, ok := snap.Files["/extra/file.txt"]; !ok {
+	if _, ok := snapFileTable(t, mgr, snap)["/extra/file.txt"]; !ok {
 		t.Error("extra file not found in snapshot")
 	}
 }
@@ -360,7 +397,8 @@ func TestManager_CommitPending_NewFile(t *testing.T) {
 	}
 
 	// 修复前：new.txt 不在 snap.Files 中（被错误地 delete）
-	hash, ok := snap.Files["new.txt"]
+	files := snapFileTable(t, mgr, snap)
+	hash, ok := files["new.txt"]
 	if !ok {
 		t.Fatal("new file should be included in snapshot after being created")
 	}
@@ -369,7 +407,7 @@ func TestManager_CommitPending_NewFile(t *testing.T) {
 	}
 
 	// 验证 HEAD 基线文件仍在快照中
-	if _, ok := snap.Files["base.txt"]; !ok {
+	if _, ok := files["base.txt"]; !ok {
 		t.Error("base file should still be in snapshot")
 	}
 }
@@ -428,12 +466,13 @@ func TestManager_CommitPending_DeletedFile(t *testing.T) {
 
 	// 修复前：store.Put 因文件不存在而失败，commit 报错
 	// 修复后：target.txt 应从快照中移除
-	if _, ok := snap.Files["target.txt"]; ok {
+	files := snapFileTable(t, mgr, snap)
+	if _, ok := files["target.txt"]; ok {
 		t.Error("deleted file should be removed from snapshot")
 	}
 
 	// 基线文件应保留
-	if _, ok := snap.Files["base.txt"]; !ok {
+	if _, ok := files["base.txt"]; !ok {
 		t.Error("base file should still be in snapshot")
 	}
 }
@@ -602,7 +641,7 @@ func TestManager_GetSnapshot_PayloadIDMismatch(t *testing.T) {
 	mgr := NewManager(tmpDir, tmpDir)
 	fileID := strings.Repeat("a", 64)
 	payloadID := strings.Repeat("b", 64)
-	snap := Snapshot{ID: payloadID, Message: "bad", Files: map[string]string{}}
+	snap := Snapshot{ID: payloadID, Message: "bad"}
 	data, err := json.Marshal(snap)
 	if err != nil {
 		t.Fatalf("marshal failed: %v", err)
@@ -630,7 +669,7 @@ func TestManager_GetSnapshot_InvalidParentID(t *testing.T) {
 
 	mgr := NewManager(tmpDir, tmpDir)
 	fileID := strings.Repeat("a", 64)
-	snap := Snapshot{ID: fileID, ParentID: "bad-parent", Message: "bad", Files: map[string]string{}}
+	snap := Snapshot{ID: fileID, ParentID: "bad-parent", Message: "bad"}
 	data, err := json.Marshal(snap)
 	if err != nil {
 		t.Fatalf("marshal failed: %v", err)
@@ -649,7 +688,7 @@ func TestManager_GetSnapshot_InvalidParentID(t *testing.T) {
 	}
 }
 
-func TestManager_GetSnapshot_InvalidFileHash(t *testing.T) {
+func TestManager_GetSnapshot_InvalidTreeHash(t *testing.T) {
 	tmpDir, err := os.MkdirTemp("", "vcs-manager-test-*")
 	if err != nil {
 		t.Fatalf("failed to create temp dir: %v", err)
@@ -658,7 +697,7 @@ func TestManager_GetSnapshot_InvalidFileHash(t *testing.T) {
 
 	mgr := NewManager(tmpDir, tmpDir)
 	fileID := strings.Repeat("a", 64)
-	snap := Snapshot{ID: fileID, Message: "bad", Files: map[string]string{"a.txt": "not-a-hash"}}
+	snap := Snapshot{ID: fileID, Message: "bad", Tree: "not-a-hash"}
 	data, err := json.Marshal(snap)
 	if err != nil {
 		t.Fatalf("marshal failed: %v", err)
@@ -673,7 +712,7 @@ func TestManager_GetSnapshot_InvalidFileHash(t *testing.T) {
 
 	_, err = mgr.GetSnapshot(fileID)
 	if err == nil {
-		t.Fatal("GetSnapshot should reject invalid file hash")
+		t.Fatal("GetSnapshot should reject invalid tree hash")
 	}
 }
 
@@ -690,7 +729,6 @@ func TestManager_GetSnapshot_ContentHashMismatch(t *testing.T) {
 		ID:        validHash,
 		Timestamp: time.Unix(1700000000, 0),
 		Message:   "original",
-		Files:     map[string]string{},
 	}
 	data, err := json.Marshal(snap)
 	if err != nil {
@@ -1247,7 +1285,7 @@ func TestManager_ReadHEAD_TrimsWhitespace(t *testing.T) {
 		t.Fatal("CommitPending returned nil snapshot")
 	}
 	// 基线文件应保留
-	if _, ok := snap2.Files["test.txt"]; !ok {
+	if _, ok := snapFileTable(t, mgr, snap2)["test.txt"]; !ok {
 		t.Error("base file should still be in snapshot (HEAD trim failed to load base)")
 	}
 }
@@ -1435,7 +1473,7 @@ func TestObjectStore_PutFromFile(t *testing.T) {
 		t.Fatalf("failed to write test file: %v", err)
 	}
 
-	hash, err := store.Put(testFile)
+	hash, _, err := store.Put(testFile)
 	if err != nil {
 		t.Fatalf("Put failed: %v", err)
 	}
@@ -1477,6 +1515,140 @@ func TestObjectStore_GetToFile(t *testing.T) {
 
 	if string(readContent) != string(testContent) {
 		t.Errorf("output file = %q, want %q", string(readContent), string(testContent))
+	}
+}
+
+func TestObjectStore_GetData_RejectsTamperedContent(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "vcs-test-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	store := NewObjectStore(tmpDir)
+	hash, err := store.PutData([]byte("original content"))
+	if err != nil {
+		t.Fatalf("PutData failed: %v", err)
+	}
+
+	// Sanity: the untouched object reads back fine.
+	if got, err := store.GetData(hash); err != nil || string(got) != "original content" {
+		t.Fatalf("GetData before tamper = %q, %v", got, err)
+	}
+
+	// Overwrite the object file in place, leaving its name (the expected hash)
+	// unchanged. A content-addressed store must not hand these bytes back.
+	objPath := filepath.Join(tmpDir, "objects", hash[:2], hash[2:])
+	if err := os.WriteFile(objPath, []byte("tampered content"), 0644); err != nil {
+		t.Fatalf("failed to tamper object: %v", err)
+	}
+
+	if _, err := store.GetData(hash); !errors.Is(err, ErrCorruptObject) {
+		t.Fatalf("GetData on tampered object err = %v, want ErrCorruptObject", err)
+	}
+}
+
+func TestManager_Checkout_RejectsTamperedObject(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "vcs-manager-test-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	mgr := NewManager(tmpDir, tmpDir)
+	file := filepath.Join(tmpDir, "a.txt")
+	if err := os.WriteFile(file, []byte("version one"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.RecordOldState(file); err != nil {
+		t.Fatal(err)
+	}
+	snap, err := mgr.CommitPending("v1", nil, nil)
+	if err != nil || snap == nil {
+		t.Fatalf("CommitPending = %v, %v", snap, err)
+	}
+	targetHash := snapFileTable(t, mgr, snap)["a.txt"]
+
+	// Move the work tree forward and tamper the object that v1 depends on.
+	if err := os.WriteFile(file, []byte("version two"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	objPath := filepath.Join(mgr.baseDir, "objects", targetHash[:2], targetHash[2:])
+	if err := os.WriteFile(objPath, []byte("corrupted"), 0644); err != nil {
+		t.Fatalf("failed to tamper object: %v", err)
+	}
+
+	if err := mgr.Checkout(snap.ID); err == nil {
+		t.Fatal("Checkout with tampered object must fail")
+	}
+	// The corrupted object must not have been written into the work tree.
+	if got, _ := os.ReadFile(file); string(got) != "version two" {
+		t.Fatalf("workspace was modified despite corruption: %q", got)
+	}
+}
+
+func TestManager_GC_RefusesToPruneObjectsWhenSnapshotDeleteFails(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "vcs-manager-test-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	mgr := NewManager(tmpDir, tmpDir)
+	file := filepath.Join(tmpDir, "f.txt")
+
+	var snapIDs []string
+	for i := 0; i < 3; i++ {
+		if err := os.WriteFile(file, []byte(fmt.Sprintf("c-%d", i)), 0644); err != nil {
+			t.Fatal(err)
+		}
+		if err := mgr.RecordOldState(file); err != nil {
+			t.Fatal(err)
+		}
+		snap, err := mgr.CommitPending(fmt.Sprintf("c %d", i), nil, nil)
+		if err != nil || snap == nil {
+			t.Fatalf("CommitPending: %v, %v", snap, err)
+		}
+		snapIDs = append(snapIDs, snap.ID)
+	}
+
+	// Make the oldest snapshot (the one GC would delete with keepLast=1)
+	// unremovable. On Windows, holding the file open with a share mode that
+	// denies deletion makes os.Remove fail; on POSIX unlink of an open file
+	// succeeds, so the scenario cannot be reproduced and the test skips.
+	stale := filepath.Join(mgr.baseDir, "snapshots", snapIDs[0]+".json")
+	lock, err := os.OpenFile(stale, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	if err := os.Remove(stale); err == nil {
+		t.Skip("filesystem allows unlinking an open file; cannot simulate delete failure")
+	}
+
+	// All objects referenced by the surviving chain must still be present
+	// after a failed GC: it must not partially prune.
+	deleted, err := mgr.GC(1)
+	if err == nil {
+		t.Fatalf("GC must fail when a stale snapshot cannot be deleted, deleted=%d", deleted)
+	}
+	if !strings.Contains(err.Error(), "refusing to prune objects") {
+		t.Fatalf("GC error = %v, want refusal to prune", err)
+	}
+
+	// The surviving HEAD snapshot must still be fully restorable.
+	head, err := mgr.GetHEAD()
+	if err != nil || head == "" {
+		t.Fatalf("GetHEAD = %q, %v", head, err)
+	}
+	if _, err := mgr.GetSnapshot(head); err != nil {
+		t.Fatalf("HEAD snapshot unreadable after failed GC: %v", err)
+	}
+	if err := mgr.Checkout(head); err != nil {
+		t.Fatalf("HEAD snapshot not restorable after failed GC: %v", err)
+	}
+	if got, _ := os.ReadFile(file); string(got) != "c-2" {
+		t.Fatalf("work tree not restored to HEAD after failed GC: %q", got)
 	}
 }
 
@@ -1589,6 +1761,77 @@ func TestObjectStore_PruneObjects_SkipsInvalidHash(t *testing.T) {
 	}
 }
 
+// TestObjectStore_PruneObjects_ConcurrentPut 验证 GC 与并发 Put/Get 共用同一把锁时
+// 不会产生"撕裂"的对象：任何一次成功的 GetData 都必须返回与哈希一致的内容。
+//
+// 注意这里断言的不是"刚写完的对象一定不被删"——GC 的目的正是删除不可达对象，
+// 一个未被 keepHashes 列出的对象被删是正确行为；要断言的是**不会读到半写文件**
+// （删除阶段与读写互斥），且删除与重建并发时不会把对象文件写坏。
+func TestObjectStore_PruneObjects_ConcurrentPut(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "vcs-prune-race-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	store := NewObjectStore(tmpDir)
+
+	const writers = 4
+	const perWriter = 60
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 40; i++ {
+			if _, err := store.PruneObjects(map[string]bool{}, 0); err != nil {
+				t.Errorf("PruneObjects failed: %v", err)
+				return
+			}
+		}
+	}()
+
+	var wg sync.WaitGroup
+	errs := make(chan error, writers*perWriter)
+	for w := 0; w < writers; w++ {
+		wg.Add(1)
+		go func(w int) {
+			defer wg.Done()
+			for i := 0; i < perWriter; i++ {
+				data := []byte(fmt.Sprintf("w%d-i%d", w, i))
+				h, err := store.PutData(data)
+				if err != nil {
+					errs <- fmt.Errorf("PutData: %w", err)
+					return
+				}
+				// 对象可能已被并发的 GC 删除（它未在 keepHashes 中），这属于
+				// 正确行为；但若仍存在，GetData 必须返回与其哈希一致的内容，
+				// 绝不能是半写/被截断的文件（GetData 内部会校验 SHA-256，
+				// 不一致会返回 ErrCorruptObject 而非静默通过）。
+				got, err := store.GetData(h)
+				if err != nil {
+					if errors.Is(err, ErrCorruptObject) {
+						errs <- fmt.Errorf("torn object read: %w", err)
+						return
+					}
+					continue // 被 GC 删除，符合预期
+				}
+				if string(got) != string(data) {
+					errs <- fmt.Errorf("content mismatch: got %q want %q", got, data)
+					return
+				}
+			}
+		}(w)
+	}
+	wg.Wait()
+	<-done
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 func TestObjectStore_ConcurrentAccess(t *testing.T) {
 	tmpDir, err := os.MkdirTemp("", "vcs-test-*")
 	if err != nil {
@@ -1640,7 +1883,7 @@ func TestComputeSnapshotID_NoCollision(t *testing.T) {
 	snapA := &Snapshot{
 		ParentID: "",
 		Message:  validHash,
-		Files:    map[string]string{"file.go": "abc123"},
+		Tree:     validHash,
 		Metadata: nil,
 	}
 
@@ -1648,7 +1891,7 @@ func TestComputeSnapshotID_NoCollision(t *testing.T) {
 	snapB := &Snapshot{
 		ParentID: validHash,
 		Message:  "",
-		Files:    map[string]string{"file.go": "abc123"},
+		Tree:     validHash,
 		Metadata: nil,
 	}
 
@@ -1663,41 +1906,57 @@ func TestComputeSnapshotID_NoCollision(t *testing.T) {
 // TestComputeSnapshotID_Deterministic 验证相同输入产生相同 ID
 func TestComputeSnapshotID_Deterministic(t *testing.T) {
 	ts := time.Unix(1700000000, 123456789)
-	snap1 := &Snapshot{
-		ParentID:  "parent123",
-		Timestamp: ts,
-		Message:   "test message",
-		Files:     map[string]string{"a.go": "hashA", "b.go": "hashB"},
-		Metadata:  map[string]string{"key": "value"},
-	}
-	snap2 := &Snapshot{
-		ParentID:  "parent123",
-		Timestamp: ts,
-		Message:   "test message",
-		Files:     map[string]string{"b.go": "hashB", "a.go": "hashA"}, // 顺序不同
-		Metadata:  map[string]string{"key": "value"},
+	treeHash := "c0ffee00000000000000000000000000000000000000000000000000000000ff"
+	makeSnap := func() *Snapshot {
+		return &Snapshot{
+			ParentID:  "parent123",
+			Timestamp: ts,
+			Message:   "test message",
+			Tree:      treeHash,
+			Metadata:  map[string]string{"key": "value"},
+		}
 	}
 
-	if computeSnapshotID(snap1) != computeSnapshotID(snap2) {
-		t.Error("same snapshot content should produce same ID regardless of map iteration order")
+	if computeSnapshotID(makeSnap()) != computeSnapshotID(makeSnap()) {
+		t.Error("same snapshot content should produce same ID")
+	}
+}
+
+// TestComputeSnapshotID_TreeAffectsID 验证 tree 哈希影响 snapshot ID：不同文件树
+// 必须产生不同 ID，否则内容不同的提交会互相覆盖。
+func TestComputeSnapshotID_TreeAffectsID(t *testing.T) {
+	ts := time.Unix(1700000000, 0)
+	base := Snapshot{
+		ParentID:  "parent123",
+		Timestamp: ts,
+		Message:   "same",
+		Tree:      "aaaa000000000000000000000000000000000000000000000000000000000000",
+		Metadata:  map[string]string{"key": "value"},
+	}
+	other := base
+	other.Tree = "bbbb000000000000000000000000000000000000000000000000000000000000"
+
+	if computeSnapshotID(&base) == computeSnapshotID(&other) {
+		t.Fatal("snapshot ID should differ when the tree differs")
 	}
 }
 
 // TestComputeSnapshotID_TimestampAffectsID 验证时间戳会影响 snapshot ID。
-// 否则同一父快照 + 相同 message/files/metadata 的重复提交会覆盖历史。
+// 否则同一父快照 + 相同 message/tree/metadata 的重复提交会覆盖历史。
 func TestComputeSnapshotID_TimestampAffectsID(t *testing.T) {
+	treeHash := "c0ffee00000000000000000000000000000000000000000000000000000000ff"
 	snap1 := &Snapshot{
 		ParentID:  "parent123",
 		Timestamp: time.Unix(1700000000, 0),
 		Message:   "same",
-		Files:     map[string]string{"a.go": "hashA"},
+		Tree:      treeHash,
 		Metadata:  map[string]string{"key": "value"},
 	}
 	snap2 := &Snapshot{
 		ParentID:  "parent123",
 		Timestamp: time.Unix(1700000001, 0),
 		Message:   "same",
-		Files:     map[string]string{"a.go": "hashA"},
+		Tree:      treeHash,
 		Metadata:  map[string]string{"key": "value"},
 	}
 
@@ -1888,7 +2147,7 @@ func TestManager_Checkout_MissingObject(t *testing.T) {
 	}
 
 	// 删除底层 object 文件，模拟对象丢失
-	objHash := snap.Files["test.txt"]
+	objHash := snapFileTable(t, mgr, snap)["test.txt"]
 	objPath := filepath.Join(tmpDir, "vcs", "objects", objHash[:2], objHash[2:])
 	if err := os.Remove(objPath); err != nil {
 		t.Fatalf("failed to remove object file: %v", err)
@@ -1922,13 +2181,13 @@ func TestManager_Checkout_CorruptedSnapshot(t *testing.T) {
 
 	mgr := NewManager(tmpDir, tmpDir)
 
-	// 手动构造一个损坏的快照文件（hash 字段过短）
+	// 手动构造一个损坏的快照文件（tree hash 过短）
 	corruptSnap := &Snapshot{
 		ID:        "",
 		ParentID:  "",
 		Timestamp: time.Now(),
 		Message:   "corrupt",
-		Files:     map[string]string{"test.txt": "short"}, // 无效 hash
+		Tree:      "short", // 无效 hash
 		Metadata:  nil,
 	}
 	corruptSnap.ID = computeSnapshotID(corruptSnap)
@@ -1982,7 +2241,7 @@ func TestManager_Checkout_PathTraversal(t *testing.T) {
 	}
 
 	// 构造一个含路径遍历的篡改快照
-	store := mgr.GetStore()
+	store := mgr.store
 	maliciousContent := []byte("malicious")
 	maliciousHash, err := store.PutData(maliciousContent)
 	if err != nil {
@@ -1991,21 +2250,26 @@ func TestManager_Checkout_PathTraversal(t *testing.T) {
 
 	// 目标路径：workDir 外的文件
 	outsideTarget := filepath.Join(filepath.Dir(tmpDir), "pwned.txt")
-	relOutside, err := filepath.Rel(tmpDir, outsideTarget)
-	if err != nil {
-		t.Fatalf("filepath.Rel failed: %v", err)
-	}
 
-	// 确保 relOutside 含 ..（路径遍历）
-	if !strings.Contains(relOutside, "..") {
-		t.Skipf("relOutside %q does not contain '..', skipping", relOutside)
+	// 直接构造一个含 ".." 条目的恶意 tree 对象（绕过 treeBuilder 的校验），
+	// 模拟被篡改的快照/对象。decodeTree 必须拒绝它，Checkout 必须 fail-closed，
+	// 绝不能把内容写到 workDir 之外。
+	rawTree, err := json.Marshal(&tree{Entries: []treeEntry{
+		{Name: "..", Kind: kindTree, Hash: maliciousHash},
+	}})
+	if err != nil {
+		t.Fatalf("failed to marshal malicious tree: %v", err)
+	}
+	treeHash, err := store.PutData(rawTree)
+	if err != nil {
+		t.Fatalf("failed to store malicious tree: %v", err)
 	}
 
 	maliciousSnap := &Snapshot{
 		ParentID:  "",
 		Timestamp: time.Now(),
 		Message:   "malicious",
-		Files:     map[string]string{relOutside: maliciousHash},
+		Tree:      treeHash,
 		Metadata:  nil,
 	}
 	maliciousSnap.ID = computeSnapshotID(maliciousSnap)
@@ -2021,9 +2285,9 @@ func TestManager_Checkout_PathTraversal(t *testing.T) {
 		t.Fatalf("failed to write malicious snapshot: %v", err)
 	}
 
-	// Checkout 篡改快照
-	if err := mgr.Checkout(maliciousSnap.ID); err != nil {
-		t.Fatalf("Checkout failed: %v", err)
+	// Checkout 必须拒绝损坏/恶意 tree（fail-closed）。
+	if err := mgr.Checkout(maliciousSnap.ID); err == nil {
+		t.Fatal("Checkout must reject a tree containing a path-traversal entry")
 	}
 
 	// 验证 workDir 外的文件没有被创建
@@ -2053,7 +2317,7 @@ func TestManager_Checkout_VirtualFileSkipped(t *testing.T) {
 	}
 
 	// 虚拟文件（绝对路径，不在 workDir 内）
-	store := mgr.GetStore()
+	store := mgr.store
 	virtualContent := []byte("virtual data")
 	virtualHash, err := store.PutData(virtualContent)
 	if err != nil {
@@ -2102,7 +2366,7 @@ func TestManager_Checkout_RollbackRemovesNewlyCreatedFiles(t *testing.T) {
 	defer os.RemoveAll(tmpDir)
 
 	mgr := NewManager(tmpDir, tmpDir)
-	store := mgr.GetStore()
+	store := mgr.store
 
 	hash1, err := store.PutData([]byte("created during checkout"))
 	if err != nil {
@@ -2118,10 +2382,10 @@ func TestManager_Checkout_RollbackRemovesNewlyCreatedFiles(t *testing.T) {
 	snap := &Snapshot{
 		Timestamp: time.Now(),
 		Message:   "partial checkout failure",
-		Files: map[string]string{
+		Tree: buildRootTree(t, mgr, map[string]string{
 			"created.txt": hash1,
 			"blocked":     hash2,
-		},
+		}),
 	}
 	snap.ID = computeSnapshotID(snap)
 	data, err := json.Marshal(snap)
@@ -2161,6 +2425,74 @@ func TestManager_Checkout_RollbackRemovesNewlyCreatedFiles(t *testing.T) {
 	}
 	if !info.IsDir() {
 		t.Fatal("blocked should remain a directory after rollback")
+	}
+}
+
+// TestManager_Checkout_BackupDirIsCleanedUp 验证 #4 的临时目录备份不会在工作区
+// 或状态目录里留下残留：成功与失败两条路径都必须清理 vcs/tmp 下的备份目录。
+func TestManager_Checkout_BackupDirIsCleanedUp(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "vcs-backup-cleanup-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	mgr := NewManager(tmpDir, tmpDir)
+	file := filepath.Join(tmpDir, "a.txt")
+	if err := os.WriteFile(file, []byte("v1"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.RecordOldState(file); err != nil {
+		t.Fatal(err)
+	}
+	snap, err := mgr.CommitPending("base", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(file, []byte("v2"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// 成功路径：checkout 成功后备份目录必须被删除。
+	if err := mgr.Checkout(snap.ID); err != nil {
+		t.Fatalf("Checkout failed: %v", err)
+	}
+	assertNoBackupDirs(t, mgr)
+
+	// 失败路径：HEAD 指向目录使 checkout 失败，备份目录同样必须被删除。
+	if err := os.WriteFile(file, []byte("v3"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mgr.headFile = tmpDir
+	if err := mgr.Checkout(snap.ID); err == nil {
+		t.Fatal("Checkout should fail when HEAD update fails")
+	}
+	assertNoBackupDirs(t, mgr)
+
+	// 备份目录不在工作区内，不得被工作区扫描当作内容文件。
+	if _, err := os.Stat(filepath.Join(tmpDir, "tmp")); !os.IsNotExist(err) {
+		t.Fatalf("backup must live under vcs/, not the work tree (got err=%v)", err)
+	}
+}
+
+// assertNoBackupDirs fails if any checkout backup directory remains under the
+// VCS tmp root.
+func assertNoBackupDirs(t *testing.T, mgr *Manager) {
+	t.Helper()
+	tmpRoot := filepath.Join(mgr.baseDir, "tmp")
+	entries, err := os.ReadDir(tmpRoot)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return
+		}
+		t.Fatalf("failed to read backup root %s: %v", tmpRoot, err)
+	}
+	if len(entries) != 0 {
+		names := make([]string, 0, len(entries))
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Fatalf("checkout left backup dirs behind: %v", names)
 	}
 }
 
@@ -2775,7 +3107,7 @@ func TestManager_CommitPending_MergesLeftoverCheckpoints(t *testing.T) {
 		t.Fatal("CommitPending returned nil snapshot")
 	}
 
-	hash, ok := snap.Files["f.txt"]
+	hash, ok := snapFileTable(t, mgr, snap)["f.txt"]
 	if !ok {
 		t.Fatal("f.txt should be in snapshot")
 	}
@@ -2842,7 +3174,7 @@ func TestManager_GC_PreservesMetadataBlob(t *testing.T) {
 	defer os.RemoveAll(tmpDir)
 
 	mgr := NewManager(tmpDir, tmpDir)
-	store := mgr.GetStore()
+	store := mgr.store
 
 	memBlob := []byte(`{"goal":"restore me"}`)
 	memHash, err := mgr.PutBlob(memBlob)
@@ -2876,4 +3208,642 @@ func TestManager_GC_PreservesMetadataBlob(t *testing.T) {
 	if !store.Exists(memHash) {
 		t.Fatal("memory blob should survive GC because snapshot metadata references it")
 	}
+}
+
+// makeSymlink 创建符号链接；Windows 上如缺少权限/开发者模式则跳过测试。
+func makeSymlink(t *testing.T, oldname, newname string) {
+	t.Helper()
+	if err := os.Symlink(oldname, newname); err != nil {
+		t.Skipf("symlinks unavailable on this system: %v", err)
+	}
+}
+
+// TestManager_isValidPath_SymlinkLogic 不依赖真实 symlink 权限，直接验证
+// 统一路径校验对"合法嵌套 / 已存在不越界 / 越界 symlink 解析"的判定。
+// 该测试利用 EvalSymlinks 对真实存在目录的解析结果，覆盖 checkNoSymlinkEscape
+// 的越界分支；symlink 本身不可用时仅覆盖前两个分支。
+func TestManager_isValidPath_Containment(t *testing.T) {
+	workDir, err := os.MkdirTemp("", "vcs-work-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(workDir)
+
+	mgr := NewManager(filepath.Join(workDir, ".jabo"), workDir)
+
+	// 合法：工作区内尚不存在的新路径，按最近存在祖先校验通过。
+	if err := mgr.isValidPath(filepath.Join(workDir, "new", "dir", "f.txt")); err != nil {
+		t.Fatalf("in-tree new path rejected: %v", err)
+	}
+
+	// 合法：已存在的嵌套文件。
+	sub := filepath.Join(workDir, "sub")
+	if err := os.MkdirAll(sub, 0755); err != nil {
+		t.Fatal(err)
+	}
+	f := filepath.Join(sub, "a.txt")
+	if err := os.WriteFile(f, []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.isValidPath(f); err != nil {
+		t.Fatalf("existing in-tree file rejected: %v", err)
+	}
+
+	// 非法：词法越界。
+	if err := mgr.isValidPath(filepath.Join(workDir, "..", "escape.txt")); !errors.Is(err, ErrPathTraversal) {
+		t.Fatalf("lexical traversal err = %v, want ErrPathTraversal", err)
+	}
+
+	// 空路径非法。
+	if err := mgr.isValidPath(""); !errors.Is(err, ErrInvalidPath) {
+		t.Fatalf("empty path err = %v, want ErrInvalidPath", err)
+	}
+}
+
+// TestManager_RecordOldState_RejectsSymlinkEscape 验证：工作区内的目录
+// 符号链接指向工作区外时，不得接受其下的路径（否则回滚会写到工作区外）。
+func TestManager_RecordOldState_RejectsSymlinkEscape(t *testing.T) {
+	workDir, err := os.MkdirTemp("", "vcs-work-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(workDir)
+
+	outside, err := os.MkdirTemp("", "vcs-outside-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(outside)
+
+	makeSymlink(t, outside, filepath.Join(workDir, "link"))
+
+	mgr := NewManager(filepath.Join(workDir, ".jabo"), workDir)
+	escaped := filepath.Join(workDir, "link", "out.txt")
+	if err := mgr.RecordOldState(escaped); !errors.Is(err, ErrSymlinkEscape) {
+		t.Fatalf("RecordOldState via symlink err = %v, want ErrSymlinkEscape", err)
+	}
+}
+
+// TestManager_Checkout_RejectsSymlinkEscape 验证：被篡改的快照若通过
+// symlink 指向工作区外，checkout 必须跳过该条目，绝不写入工作区外。
+func TestManager_Checkout_RejectsSymlinkEscape(t *testing.T) {
+	workDir, err := os.MkdirTemp("", "vcs-work-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(workDir)
+
+	outside, err := os.MkdirTemp("", "vcs-outside-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(outside)
+
+	mgr := NewManager(filepath.Join(workDir, ".jabo"), workDir)
+
+	// 建立一个正常快照，然后手工注入一个通过 symlink 逃逸的条目。
+	file := filepath.Join(workDir, "a.txt")
+	if err := os.WriteFile(file, []byte("in-tree"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.RecordOldState(file); err != nil {
+		t.Fatal(err)
+	}
+	snap, err := mgr.CommitPending("base", nil, nil)
+	if err != nil || snap == nil {
+		t.Fatalf("CommitPending: %v, %v", snap, err)
+	}
+
+	makeSymlink(t, outside, filepath.Join(workDir, "link"))
+
+	evil := filepath.Join(outside, "victim.txt")
+	if err := os.WriteFile(evil, []byte("untouched"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// 构造一个 tree 含 link/victim.txt（link 是指向 workDir 之外的符号链接）的
+	// 篡改快照，验证 Checkout 的 symlink 逃逸防护。
+	hash, err := mgr.PutBlob([]byte("malicious"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapPath := filepath.Join(mgr.baseDir, "snapshots", snap.ID+".json")
+	raw, err := os.ReadFile(snapPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var loaded Snapshot
+	if err := json.Unmarshal(raw, &loaded); err != nil {
+		t.Fatal(err)
+	}
+	// 读取父快照的现有文件表并加入逃逸条目，重建 tree。
+	baseFiles := snapFileTable(t, mgr, snap)
+	baseFiles["link/victim.txt"] = hash
+	loaded.Tree = buildRootTree(t, mgr, baseFiles)
+	loaded.ID = ""
+	loaded.ID = computeSnapshotID(&loaded)
+	tampered, err := json.Marshal(&loaded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AtomicWriteFile(filepath.Join(mgr.baseDir, "snapshots", loaded.ID+".json"), tampered, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := mgr.Checkout(loaded.ID); err != nil {
+		t.Fatalf("Checkout failed: %v", err)
+	}
+
+	// 工作区外的文件必须保持原样。
+	if got, _ := os.ReadFile(evil); string(got) != "untouched" {
+		t.Fatalf("checkout escaped work tree and overwrote %s: %q", evil, got)
+	}
+}
+
+// TestManager_Rollback_RejectsSymlinkSwap 验证：记录后若路径被 symlink
+// 替换，回滚必须 fail-closed，不写到工作区外。
+func TestManager_Rollback_RejectsSymlinkSwap(t *testing.T) {
+	workDir, err := os.MkdirTemp("", "vcs-work-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(workDir)
+
+	outside, err := os.MkdirTemp("", "vcs-outside-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(outside)
+
+	mgr := NewManager(filepath.Join(workDir, ".jabo"), workDir)
+
+	// 先在工作区写文件并记录其写前状态。
+	dir := filepath.Join(workDir, "sub")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(dir, "f.txt")
+	if err := os.WriteFile(target, []byte("old"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.RecordOldState(target); err != nil {
+		t.Fatal(err)
+	}
+
+	// 记录后把 sub 换成指向工作区外的 symlink，再模拟一次修改。
+	if err := os.RemoveAll(dir); err != nil {
+		t.Fatal(err)
+	}
+	makeSymlink(t, outside, dir)
+	evil := filepath.Join(outside, "f.txt")
+	if err := os.WriteFile(evil, []byte("outside-state"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// 回滚必须报告失败（拒绝写入），且工作区外文件不被覆盖。
+	if err := mgr.RollbackPending(); err == nil {
+		t.Fatal("RollbackPending must fail closed on symlink swap")
+	}
+	if got, _ := os.ReadFile(evil); string(got) != "outside-state" {
+		t.Fatalf("rollback escaped work tree and overwrote %s: %q", evil, got)
+	}
+}
+
+// TestManager_SharedStateDir_ConcurrentCommitsNoLoss 验证：两个 Manager 实例
+// 共享同一 stateDir 并发提交时，跨进程锁保证读 HEAD / 写 HEAD 序列化，
+// 所有提交都可在 HEAD 链上被追溯（旧实现会覆盖 HEAD、丢提交）。
+func TestManager_SharedStateDir_ConcurrentCommitsNoLoss(t *testing.T) {
+	workDir, err := os.MkdirTemp("", "vcs-shared-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(workDir)
+
+	stateDir := filepath.Join(workDir, ".jabo")
+	mgrA := NewManager(stateDir, workDir)
+	if err := mgrA.Init(); err != nil {
+		t.Fatal(err)
+	}
+
+	const commits = 8
+	var wg sync.WaitGroup
+	errs := make(chan error, commits)
+
+	for i := 0; i < commits; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			// Each goroutine owns its own Manager instance, mirroring separate
+			// processes that share the state directory. Sharing one Manager
+			// across goroutines would race on its in-memory pendingChanges set
+			// (that state is deliberately not synchronized by the state-dir
+			// lock), which is not the deployment scenario under test.
+			mgr := NewManager(stateDir, workDir)
+			name := fmt.Sprintf("f-%d.txt", i)
+			path := filepath.Join(workDir, name)
+			if err := os.WriteFile(path, []byte(fmt.Sprintf("content-%d", i)), 0644); err != nil {
+				errs <- err
+				return
+			}
+			if err := mgr.RecordOldState(path); err != nil {
+				errs <- err
+				return
+			}
+			if _, err := mgr.CommitPending(name, nil, nil); err != nil {
+				errs <- err
+			}
+		}(i)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatalf("concurrent commit failed: %v", err)
+	}
+
+	// 沿 HEAD 链回溯，必须能找到全部 8 次提交（无提交因覆盖 HEAD 丢失）。
+	history, err := mgrA.ListHistory(commits + 2)
+	if err != nil {
+		t.Fatalf("ListHistory failed: %v", err)
+	}
+	if len(history) != commits {
+		t.Fatalf("history length = %d, want %d (commits were lost)", len(history), commits)
+	}
+
+	seen := make(map[string]bool)
+	for _, snap := range history {
+		for path := range snapFileTable(t, mgrA, snap) {
+			seen[path] = true
+		}
+	}
+	for i := 0; i < commits; i++ {
+		name := fmt.Sprintf("f-%d.txt", i)
+		if !seen[name] {
+			t.Errorf("%s missing from committed history chain", name)
+		}
+	}
+}
+
+// TestManager_StateLock_SerializesHolders 验证：锁被持有时其他 acquirer 等待，
+// 释放后可获取；且不会永久卡死。
+func TestManager_StateLock_SerializesHolders(t *testing.T) {
+	workDir, err := os.MkdirTemp("", "vcs-lock-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(workDir)
+
+	mgr := NewManager(filepath.Join(workDir, ".jabo"), workDir)
+	if err := mgr.Init(); err != nil {
+		t.Fatal(err)
+	}
+
+	lock, err := mgr.acquireStateLock(time.Second)
+	if err != nil {
+		t.Fatalf("first acquire failed: %v", err)
+	}
+
+	// 第二个 acquirer 在锁被持有时应超时而非立即成功。
+	start := time.Now()
+	if _, err := mgr.acquireStateLock(120 * time.Millisecond); !errors.Is(err, ErrLockTimeout) {
+		t.Fatalf("second acquire err = %v, want ErrLockTimeout", err)
+	}
+	if time.Since(start) < 100*time.Millisecond {
+		t.Fatal("contended acquire returned too early; it must wait")
+	}
+
+	lock.release()
+
+	// 释放后应能获取。
+	l2, err := mgr.acquireStateLock(time.Second)
+	if err != nil {
+		t.Fatalf("acquire after release failed: %v", err)
+	}
+	l2.release()
+}
+
+// TestManager_StateLock_ReclaimsDeadOwner 验证：持有者崩溃（记录了过期时间戳
+// 且 PID 不存活）后，锁可被回收，不会永久污染 stateDir。
+func TestManager_StateLock_ReclaimsDeadOwner(t *testing.T) {
+	workDir, err := os.MkdirTemp("", "vcs-stale-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(workDir)
+
+	mgr := NewManager(filepath.Join(workDir, ".jabo"), workDir)
+	if err := mgr.Init(); err != nil {
+		t.Fatal(err)
+	}
+
+	// 手工写一个过期且 owner 已死的锁。
+	stale := lockRecord{PID: 1 << 30, Timestamp: time.Now().Add(-2 * lockStaleAfter)}
+	data, _ := json.Marshal(stale)
+	if err := os.WriteFile(mgr.lockPath(), data, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	lock, err := mgr.acquireStateLock(2 * time.Second)
+	if err != nil {
+		t.Fatalf("acquire over stale lock failed: %v", err)
+	}
+	lock.release()
+}
+
+// === V4: 失败路径语义与输入边界 ===
+
+// TestManager_Checkout_RollbackReportsIncompleteRollback 验证：checkout 恢复
+// 失败、且回滚写回也失败时，错误必须如实报告"回滚不完整"，不能谎报
+// "workspace rolled back"。
+//
+// 构造：快照恢复 ro/keep.txt（ro 是只读目录 → AtomicWriteFile 失败），同时
+// 工作区里 ro/keep.txt 的旧内容需要备份；回滚时写回同一只读目录同样失败，
+// 于是回滚错误被聚合上报。
+func TestManager_Checkout_RollbackReportsIncompleteRollback(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("needs POSIX directory write permissions")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("running as root ignores directory permissions")
+	}
+
+	tmpDir, err := os.MkdirTemp("", "vcs-rollback-report-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		os.Chmod(filepath.Join(tmpDir, "ro"), 0o755)
+		os.RemoveAll(tmpDir)
+	}()
+
+	mgr := NewManager(tmpDir, tmpDir)
+	store := mgr.store
+
+	hash, err := store.PutData([]byte("new content"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	snap := &Snapshot{
+		Timestamp: time.Now(),
+		Message:   "body",
+		Tree:      buildRootTree(t, mgr, map[string]string{filepath.Join("ro", "keep.txt"): hash}),
+	}
+	snap.ID = computeSnapshotID(snap)
+	data, _ := json.Marshal(snap)
+	snapDir := filepath.Join(tmpDir, "vcs", "snapshots")
+	if err := os.MkdirAll(snapDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(snapDir, snap.ID+".json"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// ro/keep.txt 已存在（既有内容 → 备份成立），随后把 ro 设为只读：
+	// restore 与 rollback 的写回都会失败。
+	roDir := filepath.Join(tmpDir, "ro")
+	if err := os.Mkdir(roDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(roDir, "keep.txt"), []byte("old content"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(roDir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+
+	err = mgr.Checkout(snap.ID)
+	if err == nil {
+		t.Fatal("Checkout should fail when the target directory is not writable")
+	}
+	// restore 失败（只读目录不可写），回滚写回同一只读目录同样失败，因此
+	// 错误必须明确报告"回滚不完整"，而不是宣称工作区已干净回滚。
+	if !strings.Contains(err.Error(), "incomplete") {
+		t.Fatalf("error must report an incomplete rollback, got: %v", err)
+	}
+}
+
+// TestManager_Checkout_PreservesExecutableBit 验证：提交时记录的可执行位在
+// checkout 恢复后仍然保留。
+func TestManager_Checkout_PreservesExecutableBit(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows has no executable bit")
+	}
+
+	tmpDir, err := os.MkdirTemp("", "vcs-mode-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	mgr := NewManager(tmpDir, tmpDir)
+	script := filepath.Join(tmpDir, "run.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\necho hi\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(script, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.RecordOldState(script); err != nil {
+		t.Fatal(err)
+	}
+	snap, err := mgr.CommitPending("mode", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 破坏：改成非可执行并改内容后 checkout 回去。
+	if err := os.Chmod(script, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(script, []byte("changed"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.Checkout(snap.ID); err != nil {
+		t.Fatalf("Checkout failed: %v", err)
+	}
+
+	info, err := os.Stat(script)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm()&0o111 == 0 {
+		t.Fatalf("executable bit lost after checkout: mode=%v", info.Mode().Perm())
+	}
+}
+
+// TestManager_Rollback_PreservesExecutableBit 验证：回滚一个已可执行脚本的
+// 改动后，可执行位必须保留。store.Get 现在按对象记录的 exec 位恢复，而不再
+// 固定写 0o644。
+func TestManager_Rollback_PreservesExecutableBit(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows has no executable bit")
+	}
+
+	tmpDir, err := os.MkdirTemp("", "vcs-rollback-mode-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	mgr := NewManager(tmpDir, tmpDir)
+	script := filepath.Join(tmpDir, "run.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\necho hi\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(script, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// 记录写前状态后修改内容（保持可执行），再回滚。
+	if err := mgr.RecordOldState(script); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(script, []byte("changed"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.RollbackPending(); err != nil {
+		t.Fatalf("RollbackPending failed: %v", err)
+	}
+
+	info, err := os.Stat(script)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm()&0o111 == 0 {
+		t.Fatalf("executable bit lost after rollback: mode=%v", info.Mode().Perm())
+	}
+	data, err := os.ReadFile(script)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "#!/bin/sh\necho hi\n" {
+		t.Fatalf("rollback restored wrong content: %q", string(data))
+	}
+}
+
+// TestManager_CommitPending_RejectsInvalidExtraFiles 验证：extraFiles 中非法
+// hash / 缺失对象 / 逃逸路径 / vcs 元数据路径都会被拒绝，不会写出不可恢复的
+// HEAD。
+func TestManager_CommitPending_RejectsInvalidExtraFiles(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "vcs-extra-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	mgr := NewManager(tmpDir, tmpDir)
+	validHash, err := mgr.PutBlob([]byte("blob"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name  string
+		files map[string]string
+	}{
+		{"malformed hash", map[string]string{"a.txt": "not-a-hash"}},
+		{"missing object", map[string]string{"a.txt": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}},
+		{"path traversal", map[string]string{filepath.Join("..", "escape.txt"): validHash}},
+		{"vcs metadata path", map[string]string{filepath.Join("vcs", "snapshots", "x.json"): validHash}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := mgr.CommitPending("bad", nil, tc.files); err == nil {
+				t.Fatalf("CommitPending should reject %s", tc.name)
+			}
+		})
+	}
+
+	// 合法的 extra file 仍应成功。
+	snap, err := mgr.CommitPending("good", nil, map[string]string{"a.txt": validHash})
+	if err != nil {
+		t.Fatalf("CommitPending with valid extra file failed: %v", err)
+	}
+	if snap == nil {
+		t.Fatal("expected a snapshot")
+	}
+	files := snapFileTable(t, mgr, snap)
+	if files["a.txt"] != validHash {
+		t.Fatalf("extra file hash not recorded: %v", files)
+	}
+}
+
+// TestManager_ListHistory_ReportsUnreadableHEAD 验证：HEAD 指向的快照不可读时，
+// ListHistory 必须报错，而不是把空/部分历史当作完整真相。
+func TestManager_ListHistory_ReportsUnreadableHEAD(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "vcs-broken-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	mgr := NewManager(tmpDir, tmpDir)
+	f := filepath.Join(tmpDir, "f.txt")
+	if err := os.WriteFile(f, []byte("v0"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.RecordOldState(f); err != nil {
+		t.Fatal(err)
+	}
+	snap, err := mgr.CommitPending("c0", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 删除 HEAD 指向的快照文件，制造 HEAD 不可读。
+	if err := os.Remove(filepath.Join(tmpDir, "vcs", "snapshots", snap.ID+".json")); err != nil {
+		t.Fatal(err)
+	}
+
+	history, err := mgr.ListHistory(10)
+	if err == nil {
+		t.Fatal("ListHistory must report an unreadable HEAD, not silently return nothing")
+	}
+	if len(history) != 0 {
+		t.Fatalf("history = %v, want empty when HEAD is unreadable", idsOf(history))
+	}
+}
+
+// TestManager_ListHistory_StopsCleanlyAtPrunedTail 验证：GC 修剪掉的尾部不属于
+// 错误——链走到被修剪的祖先处应干净结束，而不是报"链断裂"。
+func TestManager_ListHistory_StopsCleanlyAtPrunedTail(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "vcs-pruned-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	mgr := NewManager(tmpDir, tmpDir)
+	f := filepath.Join(tmpDir, "f.txt")
+	for i := 0; i < 4; i++ {
+		if err := os.WriteFile(f, []byte(fmt.Sprintf("v%d", i)), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := mgr.RecordOldState(f); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := mgr.CommitPending(fmt.Sprintf("c%d", i), nil, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if _, err := mgr.GC(2); err != nil {
+		t.Fatalf("GC failed: %v", err)
+	}
+
+	history, err := mgr.ListHistory(10)
+	if err != nil {
+		t.Fatalf("ListHistory after GC should stop cleanly at the pruned tail, got: %v", err)
+	}
+	if len(history) != 2 {
+		t.Fatalf("history length = %d, want 2 (retained window)", len(history))
+	}
+}
+
+func idsOf(snaps []*Snapshot) []string {
+	out := make([]string, 0, len(snaps))
+	for _, s := range snaps {
+		out = append(out, s.ID)
+	}
+	return out
 }

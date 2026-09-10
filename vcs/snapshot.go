@@ -24,15 +24,25 @@ type FileDiff struct {
 	NewHash string
 }
 
-// Snapshot is an immutable file-tree state: a map of relative path -> object
-// hash, linked to a parent snapshot to form a chain.
+// Snapshot is an immutable file-tree state. The tree itself is stored as
+// content-addressed tree objects (see tree.go); the snapshot only references
+// the root tree hash, so a snapshot file stays O(1) regardless of work-tree
+// size and unchanged directories are shared across snapshots.
 type Snapshot struct {
 	ID        string            `json:"id"`
 	ParentID  string            `json:"parent_id"`
 	Timestamp time.Time         `json:"timestamp"`
 	Message   string            `json:"message"`
-	Files     map[string]string `json:"files"`
+	Tree      string            `json:"tree"`
 	Metadata  map[string]string `json:"metadata"`
+
+	// files is the expanded path -> {hash, exec} table, populated on read (by
+	// the Manager, which has the object store) and never serialized. It is a
+	// convenience for callers that need the flat view; the authoritative form
+	// is Tree. trees is the set of tree objects the expansion visited, used by
+	// GC to keep subtrees reachable.
+	files map[string]flatFile
+	trees map[string]struct{}
 }
 
 // computeSnapshotID derives a content-addressed ID from a snapshot's payload.
@@ -50,16 +60,7 @@ func computeSnapshotID(snap *Snapshot) string {
 	writeStr(snap.ParentID)
 	writeStr(snap.Timestamp.UTC().Format(time.RFC3339Nano))
 	writeStr(snap.Message)
-
-	paths := make([]string, 0, len(snap.Files))
-	for p := range snap.Files {
-		paths = append(paths, p)
-	}
-	sort.Strings(paths)
-	for _, p := range paths {
-		writeStr(p)
-		writeStr(snap.Files[p])
-	}
+	writeStr(snap.Tree)
 
 	if snap.Metadata != nil {
 		keys := make([]string, 0, len(snap.Metadata))
