@@ -38,11 +38,13 @@ func TestContains_NormalizesDotDot(t *testing.T) {
 	}
 }
 
-func TestContains_RelativePathsResolved(t *testing.T) {
+func TestContains_RelativePathsResolvedAgainstCWD(t *testing.T) {
+	// Contains makes both sides absolute with filepath.Abs, so a relative child
+	// is resolved against the process working directory, not against parent.
 	parent, _ := filepath.Abs(filepath.FromSlash("."))
 	child := filepath.FromSlash("subdir/file.txt")
 	if !Contains(parent, child) {
-		t.Logf("Contains(abs(.), subdir/file.txt) = false (may be expected depending on CWD)")
+		t.Fatalf("Contains(abs(.), subdir/file.txt) = false, want true (child under CWD)")
 	}
 }
 

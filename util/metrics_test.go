@@ -75,7 +75,7 @@ func TestMetrics_GetAll_Reset(t *testing.T) {
 
 	m.Inc("foo")
 	m.SetGauge("bar", 100)
-	
+
 	all := m.GetAll()
 	counters := all["counters"].(map[string]int64)
 	as.Equal(int64(1), counters["foo"])

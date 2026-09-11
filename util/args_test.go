@@ -88,7 +88,7 @@ func TestArgParser_Trailing(t *testing.T) {
 	// If we pass "cmd" as first arg, it will be treated as trailing or unknown if not flag.
 	// Let's assume we pass args excluding program name usually, or program name is handled.
 	// ArgParser doesn't skip index 0 automatically.
-	
+
 	// If "cmd" is not a flag, it goes to trailing.
 	result := parser.Parse(args)
 	if result.HasErrors() {

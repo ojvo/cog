@@ -742,15 +742,19 @@ func SafeJoin(cwd, path string) (string, error) {
 }
 
 // Contains reports whether child is inside parent (or equal to parent).
-// Both paths are Cleaned and made absolute before comparison.
+// Both paths are made absolute, and a relative child is resolved against the
+// process working directory, matching filepath.Abs. Containment is decided
+// with filepath.Rel, which also makes Windows comparisons case-insensitive, so
+// Contains and Within share one definition of containment.
 // Returns false if either path is empty or cannot be resolved.
 //
 // Examples:
 //
-//	Contains("/a/b", "/a/b/c")   // true
-//	Contains("/a/b", "/a/b")     // true
-//	Contains("/a/b", "/a/bc")    // false (boundary-safe, no prefix false positive)
+//	Contains("/a/b", "/a/b/c")      // true
+//	Contains("/a/b", "/a/b")        // true
+//	Contains("/a/b", "/a/bc")       // false (boundary-safe, no prefix false positive)
 //	Contains("/a/b", "/a/../a/b/c") // true (Cleaned)
+//	Contains("/", "/a")             // true (root contains everything)
 func Contains(parent, child string) bool {
 	if parent == "" || child == "" {
 		return false
@@ -763,8 +767,16 @@ func Contains(parent, child string) bool {
 	if err != nil {
 		return false
 	}
-	sep := string(filepath.Separator)
-	return cAbs == pAbs || strings.HasPrefix(cAbs+sep, pAbs+sep)
+	return isWithin(pAbs, cAbs)
+}
+
+// isWithin reports whether child is parent or lies under parent. Both arguments
+// must already be absolute and cleaned. filepath.Rel yields "." for the path
+// itself and a ".."-prefixed result for anything outside, which makes this the
+// single containment primitive shared by Contains, Within and Outside.
+func isWithin(parent, child string) bool {
+	rel, err := filepath.Rel(parent, child)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 // Overlaps reports whether a and b share any common directory prefix.
@@ -779,4 +791,104 @@ func Contains(parent, child string) bool {
 //	Overlaps("/a/b", "/x/y")      // false
 func Overlaps(a, b string) bool {
 	return Contains(a, b) || Contains(b, a)
+}
+
+// Within reports whether path lies inside the workspace root (the root itself
+// counts as within). A relative path is resolved against the root, so callers
+// need not pre-join it. Returns false when either path cannot be resolved, so
+// callers may treat it as a conservative gate.
+//
+// Examples:
+//
+//	Within("/a/b", "/a/b/c")   // true
+//	Within("/a/b", "/a/b")     // true
+//	Within("/a/b", "/a/bc")    // false (boundary-safe)
+//	Within("/a/b", "../c")     // false
+//	Within("/a/b", "c/d")      // true (relative to root)
+func Within(workspace, path string) bool {
+	root, ok := absClean(workspace)
+	if !ok {
+		return false
+	}
+	joined := path
+	if joined != "" && !filepath.IsAbs(joined) {
+		joined = filepath.Join(root, joined)
+	}
+	candidate, ok := absClean(joined)
+	if !ok {
+		return false
+	}
+	return isWithin(root, candidate)
+}
+
+// Outside reports whether path can be proven to lie outside the workspace root.
+// It is the fail-closed counterpart of Within: callers that must not touch
+// anything beyond the workspace should proceed only when it returns true.
+// Returns false when either path cannot be resolved, so an unresolvable path is
+// never mistaken for a proven-outside one. A relative path is resolved against
+// the root, mirroring Within.
+//
+// Examples:
+//
+//	Outside("/a/b", "/a/b/c")   // false
+//	Outside("/a/b", "/a/c")     // true
+//	Outside("/a/b", "../c")     // true
+func Outside(workspace, path string) bool {
+	root, ok := absClean(workspace)
+	if !ok {
+		return false
+	}
+	joined := path
+	if joined != "" && !filepath.IsAbs(joined) {
+		joined = filepath.Join(root, joined)
+	}
+	candidate, ok := absClean(joined)
+	if !ok {
+		return false
+	}
+	rel, err := filepath.Rel(root, candidate)
+	return err == nil && (rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)))
+}
+
+// absClean returns the absolute, cleaned form of path. ok is false for an empty
+// path or one that cannot be made absolute.
+func absClean(path string) (string, bool) {
+	if strings.TrimSpace(path) == "" {
+		return "", false
+	}
+	abs, err := filepath.Abs(filepath.Clean(path))
+	if err != nil {
+		return "", false
+	}
+	return abs, true
+}
+
+// CleanWithin normalizes path to an absolute path confined to the workspace
+// root. A relative path is joined to the root first. It returns "" when the
+// path is empty, cannot be resolved, or escapes the root, so callers can treat
+// the empty result as a rejection.
+//
+// Examples:
+//
+//	CleanWithin("/a/b", "c/d")     // "/a/b/c/d"
+//	CleanWithin("/a/b", "/a/b/c")  // "/a/b/c"
+//	CleanWithin("/a/b", "../c")    // ""
+//	CleanWithin("/a/b", "")        // ""
+func CleanWithin(workspace, path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ""
+	}
+	root, ok := absClean(workspace)
+	if !ok {
+		return ""
+	}
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(root, path)
+	}
+	path = filepath.Clean(path)
+	if !isWithin(root, path) {
+		return ""
+	}
+	return path
 }

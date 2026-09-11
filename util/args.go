@@ -107,7 +107,7 @@ func (p *ArgParser) BoolHelp(target *bool, names, help string) *ArgParser {
 		p.result.addError(fmt.Errorf("bool target cannot be nil"))
 		return p
 	}
-	
+
 	nameList := p.parseNames(names)
 	if len(nameList) == 0 {
 		p.result.addError(fmt.Errorf("bool argument needs at least one name"))
@@ -151,7 +151,7 @@ func (p *ArgParser) stringArg(target *string, required bool, names, help string)
 		p.result.addError(fmt.Errorf("string target cannot be nil"))
 		return p
 	}
-	
+
 	nameList := p.parseNames(names)
 	if len(nameList) == 0 {
 		p.result.addError(fmt.Errorf("string argument needs at least one name"))
@@ -202,7 +202,7 @@ func (p *ArgParser) intArg(target *int, required bool, names, help string) *ArgP
 		p.result.addError(fmt.Errorf("int target cannot be nil"))
 		return p
 	}
-	
+
 	nameList := p.parseNames(names)
 	if len(nameList) == 0 {
 		p.result.addError(fmt.Errorf("int argument needs at least one name"))
@@ -217,7 +217,7 @@ func (p *ArgParser) intArg(target *int, required bool, names, help string) *ArgP
 		if strings.HasPrefix(nextArg, "-") && nextArg != "-" && nextArg != "--" {
 			return 0, fmt.Errorf("%w for %s", ArgErrMissingValue, args[index])
 		}
-		
+
 		val, err := strconv.Atoi(nextArg)
 		if err != nil {
 			return 0, fmt.Errorf("%w: '%s' is not a valid integer", ArgErrInvalidValue, nextArg)
@@ -258,7 +258,7 @@ func (p *ArgParser) int64Arg(target *int64, required bool, names, help string) *
 		p.result.addError(fmt.Errorf("int64 target cannot be nil"))
 		return p
 	}
-	
+
 	nameList := p.parseNames(names)
 	if len(nameList) == 0 {
 		p.result.addError(fmt.Errorf("int64 argument needs at least one name"))
@@ -273,7 +273,7 @@ func (p *ArgParser) int64Arg(target *int64, required bool, names, help string) *
 		if strings.HasPrefix(nextArg, "-") && nextArg != "-" && nextArg != "--" {
 			return 0, fmt.Errorf("%w for %s", ArgErrMissingValue, args[index])
 		}
-		
+
 		val, err := strconv.ParseInt(nextArg, 10, 64)
 		if err != nil {
 			return 0, fmt.Errorf("%w: '%s' is not a valid int64", ArgErrInvalidValue, nextArg)
@@ -314,7 +314,7 @@ func (p *ArgParser) uintArg(target *uint, required bool, names, help string) *Ar
 		p.result.addError(fmt.Errorf("uint target cannot be nil"))
 		return p
 	}
-	
+
 	nameList := p.parseNames(names)
 	if len(nameList) == 0 {
 		p.result.addError(fmt.Errorf("uint argument needs at least one name"))
@@ -329,7 +329,7 @@ func (p *ArgParser) uintArg(target *uint, required bool, names, help string) *Ar
 		if strings.HasPrefix(nextArg, "-") && nextArg != "-" && nextArg != "--" {
 			return 0, fmt.Errorf("%w for %s", ArgErrMissingValue, args[index])
 		}
-		
+
 		val, err := strconv.ParseUint(nextArg, 10, 64)
 		if err != nil {
 			return 0, fmt.Errorf("%w: '%s' is not a valid uint", ArgErrInvalidValue, nextArg)
@@ -370,7 +370,7 @@ func (p *ArgParser) floatArg(target *float64, required bool, names, help string)
 		p.result.addError(fmt.Errorf("float64 target cannot be nil"))
 		return p
 	}
-	
+
 	nameList := p.parseNames(names)
 	if len(nameList) == 0 {
 		p.result.addError(fmt.Errorf("float argument needs at least one name"))
@@ -385,7 +385,7 @@ func (p *ArgParser) floatArg(target *float64, required bool, names, help string)
 		if strings.HasPrefix(nextArg, "-") && nextArg != "-" && nextArg != "--" {
 			return 0, fmt.Errorf("%w for %s", ArgErrMissingValue, args[index])
 		}
-		
+
 		val, err := strconv.ParseFloat(nextArg, 64)
 		if err != nil {
 			return 0, fmt.Errorf("%w: '%s' is not a valid float", ArgErrInvalidValue, nextArg)
@@ -426,7 +426,7 @@ func (p *ArgParser) stringsArg(target *[]string, required bool, names, help stri
 		p.result.addError(fmt.Errorf("[]string target cannot be nil"))
 		return p
 	}
-	
+
 	nameList := p.parseNames(names)
 	if len(nameList) == 0 {
 		p.result.addError(fmt.Errorf("strings argument needs at least one name"))
@@ -436,7 +436,7 @@ func (p *ArgParser) stringsArg(target *[]string, required bool, names, help stri
 	handler := func(args []string, index int) (int, error) {
 		consumed := 0
 		values := []string{}
-		
+
 		for i := index + 1; i < len(args); i++ {
 			arg := args[i]
 			if strings.HasPrefix(arg, "-") && arg != "-" {
@@ -445,11 +445,11 @@ func (p *ArgParser) stringsArg(target *[]string, required bool, names, help stri
 			values = append(values, arg)
 			consumed++
 		}
-		
+
 		if len(values) == 0 {
 			return 0, fmt.Errorf("%w for %s", ArgErrMissingValue, args[index])
 		}
-		
+
 		*target = values
 		return consumed, nil
 	}
@@ -486,7 +486,7 @@ func (p *ArgParser) intsArg(target *[]int, required bool, names, help string) *A
 		p.result.addError(fmt.Errorf("[]int target cannot be nil"))
 		return p
 	}
-	
+
 	nameList := p.parseNames(names)
 	if len(nameList) == 0 {
 		p.result.addError(fmt.Errorf("ints argument needs at least one name"))
@@ -496,26 +496,26 @@ func (p *ArgParser) intsArg(target *[]int, required bool, names, help string) *A
 	handler := func(args []string, index int) (int, error) {
 		consumed := 0
 		values := []int{}
-		
+
 		for i := index + 1; i < len(args); i++ {
 			arg := args[i]
 			if strings.HasPrefix(arg, "-") && arg != "-" {
 				break
 			}
-			
+
 			val, err := strconv.Atoi(arg)
 			if err != nil {
 				return 0, fmt.Errorf("%w: '%s' is not a valid integer", ArgErrInvalidValue, arg)
 			}
-			
+
 			values = append(values, val)
 			consumed++
 		}
-		
+
 		if len(values) == 0 {
 			return 0, fmt.Errorf("%w for %s", ArgErrMissingValue, args[index])
 		}
-		
+
 		*target = values
 		return consumed, nil
 	}
@@ -536,12 +536,12 @@ func (p *ArgParser) Trailing(target *[]string, help string) *ArgParser {
 		p.result.addError(fmt.Errorf("trailing target cannot be nil"))
 		return p
 	}
-	
+
 	if p.trailingVar != nil {
 		p.result.addError(fmt.Errorf("trailing arguments already defined"))
 		return p
 	}
-	
+
 	p.trailingVar = target
 	p.trailingHelp = help
 	return p
@@ -553,7 +553,7 @@ func (p *ArgParser) Custom(handler ArgHandler, names, help string) *ArgParser {
 		p.result.addError(fmt.Errorf("custom handler cannot be nil"))
 		return p
 	}
-	
+
 	nameList := p.parseNames(names)
 	if len(nameList) == 0 {
 		p.result.addError(fmt.Errorf("custom argument needs at least one name"))
@@ -575,11 +575,11 @@ func (p *ArgParser) parseNames(names string) []string {
 	if names == "" {
 		return nil
 	}
-	
+
 	parts := strings.FieldsFunc(names, func(r rune) bool {
 		return r == ',' || r == ' ' || r == '\t'
 	})
-	
+
 	var result []string
 	for _, part := range parts {
 		part = strings.TrimSpace(part)
@@ -587,7 +587,7 @@ func (p *ArgParser) parseNames(names string) []string {
 			result = append(result, part)
 		}
 	}
-	
+
 	return result
 }
 
@@ -595,18 +595,18 @@ func (p *ArgParser) parseNames(names string) []string {
 func (p *ArgParser) normalizeNames(names []string) []string {
 	var normalized []string
 	seenNames := make(map[string]bool)
-	
+
 	for _, name := range names {
 		name = strings.TrimSpace(name)
 		if name == "" {
 			continue
 		}
-		
+
 		if strings.HasPrefix(name, "---") {
 			p.result.addError(fmt.Errorf("invalid argument name: %s (too many dashes)", name))
 			continue
 		}
-		
+
 		if !strings.HasPrefix(name, "-") {
 			if len(name) == 1 {
 				name = "-" + name
@@ -614,16 +614,16 @@ func (p *ArgParser) normalizeNames(names []string) []string {
 				name = "--" + name
 			}
 		}
-		
+
 		if !p.isValidArgName(name) {
 			p.result.addError(fmt.Errorf("invalid argument name: %s", name))
 			continue
 		}
-		
+
 		if !seenNames[name] {
 			normalized = append(normalized, name)
 			seenNames[name] = true
-			
+
 			if strings.HasPrefix(name, "--") && !strings.HasPrefix(name, "--no-") {
 				noName := "--no-" + name[2:]
 				if !seenNames[noName] {
@@ -641,30 +641,30 @@ func (p *ArgParser) isValidArgName(name string) bool {
 	if name == "-" || name == "--" {
 		return false
 	}
-	
+
 	if strings.HasPrefix(name, "-") && len(name) == 2 {
 		char := name[1]
 		return (char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') || (char >= '0' && char <= '9')
 	}
-	
+
 	if strings.HasPrefix(name, "--") && len(name) > 2 {
 		rest := name[2:]
 		for _, char := range rest {
-			if !((char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') || 
-				 (char >= '0' && char <= '9') || char == '-' || char == '_') {
+			if !((char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') ||
+				(char >= '0' && char <= '9') || char == '-' || char == '_') {
 				return false
 			}
 		}
 		return true
 	}
-	
+
 	return false
 }
 
 // registerArgument 注册参数
 func (p *ArgParser) registerArgument(arg *ArgDefinition) {
 	p.args = append(p.args, arg)
-	
+
 	for _, name := range arg.names {
 		if _, exists := p.argMap[name]; exists {
 			p.result.addError(fmt.Errorf("duplicate argument name: %s", name))
@@ -677,7 +677,7 @@ func (p *ArgParser) registerArgument(arg *ArgDefinition) {
 // Parse 执行解析
 func (p *ArgParser) Parse(args []string) *ArgParseResult {
 	result := &ArgParseResult{}
-	
+
 	if p.result.HasErrors() {
 		result.errors = append(result.errors, p.result.errors...)
 		return result
@@ -691,17 +691,17 @@ func (p *ArgParser) Parse(args []string) *ArgParseResult {
 
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
-		
+
 		if arg == "--" {
 			trailingArgs = append(trailingArgs, args[i+1:]...)
 			break
 		}
-		
+
 		if !strings.HasPrefix(arg, "-") || arg == "-" {
 			trailingArgs = append(trailingArgs, arg)
 			continue
 		}
-		
+
 		argument, exists := p.argMap[arg]
 		if !exists {
 			if p.strictMode {
@@ -711,22 +711,22 @@ func (p *ArgParser) Parse(args []string) *ArgParseResult {
 			}
 			continue
 		}
-		
+
 		if argument.used {
 			result.addError(fmt.Errorf("%w: %s", ArgErrDuplicate, arg))
 			continue
 		}
-		
+
 		consumed, err := argument.handler(args, i)
 		if err != nil {
 			result.addError(fmt.Errorf("%s: %w", arg, err))
 			continue
 		}
-		
+
 		argument.used = true
 		i += consumed
 	}
-	
+
 	if len(trailingArgs) > 0 && p.trailingVar != nil {
 		*p.trailingVar = trailingArgs
 	} else if len(trailingArgs) > 0 {
@@ -734,7 +734,7 @@ func (p *ArgParser) Parse(args []string) *ArgParseResult {
 			result.addWarning(fmt.Sprintf("ignored trailing argument: %s", arg))
 		}
 	}
-	
+
 	for _, arg := range p.args {
 		if arg.required && !arg.used {
 			name := arg.names[0]
@@ -747,14 +747,14 @@ func (p *ArgParser) Parse(args []string) *ArgParseResult {
 			result.addError(fmt.Errorf("%w: %s", ArgErrRequired, name))
 		}
 	}
-	
+
 	return result
 }
 
 // Usage 生成使用说明
 func (p *ArgParser) Usage() string {
 	var builder strings.Builder
-	
+
 	if p.programName != "" {
 		builder.WriteString("Usage: " + p.programName + " [OPTIONS]")
 		if p.trailingVar != nil {
@@ -762,11 +762,11 @@ func (p *ArgParser) Usage() string {
 		}
 		builder.WriteString("\n\n")
 	}
-	
+
 	if p.description != "" {
 		builder.WriteString(p.description + "\n\n")
 	}
-	
+
 	if len(p.args) > 0 {
 		builder.WriteString("Options:\n")
 		for _, arg := range p.args {
@@ -776,26 +776,26 @@ func (p *ArgParser) Usage() string {
 					nameStr = append(nameStr, name)
 				}
 			}
-			
+
 			names := strings.Join(nameStr, ", ")
-			
+
 			if arg.argType != "" && arg.argType != "bool" {
 				names += " " + arg.argType
 			}
-			
+
 			if arg.required {
 				names += " (required)"
 			}
-			
+
 			builder.WriteString(fmt.Sprintf("  %-28s %s\n", names, arg.help))
 		}
 	}
-	
+
 	if p.trailingVar != nil {
-		builder.WriteString(fmt.Sprintf("\nArguments:\n  %-28s %s\n", 
+		builder.WriteString(fmt.Sprintf("\nArguments:\n  %-28s %s\n",
 			"[ARGS...]", p.trailingHelp))
 	}
-	
+
 	return builder.String()
 }
 
@@ -820,14 +820,14 @@ func ArgParse(args []string, setup func(*ArgParser)) (*ArgParseResult, error) {
 	if setup == nil {
 		return nil, fmt.Errorf("%w: setup function cannot be nil", ArgErrInvalidSetup)
 	}
-	
+
 	parser := NewArgParser()
 	setup(parser)
 	result := parser.Parse(args)
-	
+
 	if result.HasErrors() {
 		return result, errors.New(result.Error())
 	}
-	
+
 	return result, nil
 }
